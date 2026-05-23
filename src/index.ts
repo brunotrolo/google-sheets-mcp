@@ -4,7 +4,6 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
@@ -18,7 +17,7 @@ dotenv.config();
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID ?? '';
 
 if (!SPREADSHEET_ID) {
-  console.warn('[WARN] SPREADSHEET_ID not set – tool calls will fail until it is configured.');
+  console.warn('[WARN] SPREADSHEET_ID não configurado – as chamadas às ferramentas falharão.');
 }
 
 const auth = new google.auth.GoogleAuth({
@@ -27,7 +26,7 @@ const auth = new google.auth.GoogleAuth({
 });
 
 // ---------------------------------------------------------------------------
-// Sheets helper
+// Sheets helpers
 // ---------------------------------------------------------------------------
 
 async function readSheet(range: string): Promise<string[][]> {
@@ -53,204 +52,7 @@ function rowsToObjects(
 }
 
 // ---------------------------------------------------------------------------
-// Static Tool Registry
-// ---------------------------------------------------------------------------
-
-const TOOL_REGISTRY: Tool[] = [
-  {
-    name: 'get_cockpit_ativas',
-    description:
-      'Lê a aba COCKPIT do Google Sheets. Ignora as primeiras 9 linhas e usa a linha 10 como cabeçalho. Retorna apenas as posições onde a coluna STATUS é exatamente "ATIVO".',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'get_screener_quantitativo',
-    description:
-      'Lê a aba SCREENER_QUANTITATIVO a partir da linha 1 e retorna o mapeamento JSON das oportunidades estruturadas.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'get_scanner_opcoes',
-    description:
-      'Lê a aba SCANNER_OPCOES a partir da linha 1 e retorna dados agregados de liquidez e parâmetros de gregas.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'get_maiores_lucros',
-    description:
-      'Lê a aba SELECAO_OPCOES_MAIORES_LUCROS a partir da linha 1 e retorna o ranking das estruturas com maior taxa de prêmio teórica.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'get_maiores_volumes',
-    description:
-      'Lê a aba SELECAO_MAIORES_VOLUMES a partir da linha 1 e retorna o fluxo de volume de CALLs e PUTs.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'get_tendencia_m9m21',
-    description:
-      'Lê a aba RANKING_TENDENCIA_M9M21 a partir da linha 1. Aceita argumento opcional "ticker" para filtrar a tendência (M9M21_TREND) de um papel específico.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ticker: {
-          type: 'string',
-          description:
-            'Código do ativo (ex: PETR4) para filtrar resultados. Se omitido, retorna todos os ativos.',
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: 'get_correl_ibov',
-    description:
-      'Lê a aba RANKING_CORREL_IBOV a partir da linha 1 e retorna o coeficiente de correlação dos ativos frente ao índice.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-];
-
-// ---------------------------------------------------------------------------
-// Tool Handlers
-// ---------------------------------------------------------------------------
-
-async function handleToolCall(
-  name: string,
-  args: Record<string, unknown>,
-): Promise<string> {
-  if (!SPREADSHEET_ID) {
-    throw new Error('SPREADSHEET_ID não configurado. Defina a variável de ambiente antes de iniciar o servidor.');
-  }
-
-  switch (name) {
-    case 'get_cockpit_ativas': {
-      // Fetch the full COCKPIT sheet; line 10 (index 9) is the header row.
-      const allRows = await readSheet('COCKPIT');
-      if (allRows.length < 10) {
-        return JSON.stringify({ data: [], message: 'A aba COCKPIT possui menos de 10 linhas.' });
-      }
-
-      const headers = allRows[9] as string[];
-      const dataRows = allRows.slice(10) as string[][];
-
-      if (!headers || headers.length === 0) return JSON.stringify([]);
-
-      const objects = rowsToObjects(headers, dataRows);
-
-      // Find the status column by name (case-insensitive).
-      const statusKey = headers.find(
-        (h) =>
-          h.toUpperCase() === 'STATUS' ||
-          h.toUpperCase().includes('STATUS') ||
-          h.toUpperCase().includes('SITUACAO') ||
-          h.toUpperCase().includes('SITUAÇÃO'),
-      );
-
-      if (!statusKey) {
-        // No recognisable status column – return all rows with a warning.
-        return JSON.stringify({
-          warning: 'Coluna de status não encontrada. Retornando todas as linhas.',
-          data: objects,
-        });
-      }
-
-      const filtered = objects.filter((obj) => obj[statusKey] === 'ATIVO');
-      return JSON.stringify(filtered, null, 2);
-    }
-
-    case 'get_screener_quantitativo': {
-      const rows = await readSheet('SCREENER_QUANTITATIVO');
-      if (rows.length < 2) return JSON.stringify([]);
-      const [headers, ...dataRows] = rows as [string[], ...string[][]];
-      return JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
-    }
-
-    case 'get_scanner_opcoes': {
-      const rows = await readSheet('SCANNER_OPCOES');
-      if (rows.length < 2) return JSON.stringify([]);
-      const [headers, ...dataRows] = rows as [string[], ...string[][]];
-      return JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
-    }
-
-    case 'get_maiores_lucros': {
-      const rows = await readSheet('SELECAO_OPCOES_MAIORES_LUCROS');
-      if (rows.length < 2) return JSON.stringify([]);
-      const [headers, ...dataRows] = rows as [string[], ...string[][]];
-      return JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
-    }
-
-    case 'get_maiores_volumes': {
-      const rows = await readSheet('SELECAO_MAIORES_VOLUMES');
-      if (rows.length < 2) return JSON.stringify([]);
-      const [headers, ...dataRows] = rows as [string[], ...string[][]];
-      return JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
-    }
-
-    case 'get_tendencia_m9m21': {
-      const rows = await readSheet('RANKING_TENDENCIA_M9M21');
-      if (rows.length < 2) return JSON.stringify([]);
-      const [headers, ...dataRows] = rows as [string[], ...string[][]];
-      let objects = rowsToObjects(headers, dataRows);
-
-      const ticker = args['ticker'] as string | undefined;
-      if (ticker && ticker.trim() !== '') {
-        // Find the ticker/ativo column.
-        const tickerKey = headers.find(
-          (h) =>
-            h.toUpperCase() === 'TICKER' ||
-            h.toUpperCase() === 'ATIVO' ||
-            h.toUpperCase().includes('TICKER') ||
-            h.toUpperCase().includes('ATIVO'),
-        );
-        if (tickerKey) {
-          objects = objects.filter(
-            (obj) => obj[tickerKey]?.toUpperCase() === ticker.toUpperCase(),
-          );
-        }
-      }
-
-      return JSON.stringify(objects, null, 2);
-    }
-
-    case 'get_correl_ibov': {
-      const rows = await readSheet('RANKING_CORREL_IBOV');
-      if (rows.length < 2) return JSON.stringify([]);
-      const [headers, ...dataRows] = rows as [string[], ...string[][]];
-      return JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
-    }
-
-    default:
-      throw new Error(`Ferramenta desconhecida: ${name}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// MCP Server factory (one instance per SSE connection)
+// MCP Server factory – one instance per SSE connection
 // ---------------------------------------------------------------------------
 
 function createMcpServer(): Server {
@@ -259,17 +61,200 @@ function createMcpServer(): Server {
     { capabilities: { tools: {} } },
   );
 
+  // ── Tool discovery ────────────────────────────────────────────────────────
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_REGISTRY,
+    tools: [
+      {
+        name: 'get_cockpit_ativas',
+        description:
+          'Lê a aba COCKPIT (range A10:Z500, cabeçalhos na linha 10). ' +
+          'Retorna apenas posições onde STATUS, STATUS_OP, VENDA ou COMPRA ' +
+          'contêm "ATIVO", ou onde QTDE é diferente de vazio.',
+      },
+      {
+        name: 'get_screener_quantitativo',
+        description:
+          'Lê a aba SCREENER_QUANTITATIVO (A1:Z500). ' +
+          'Retorna o mapeamento JSON das oportunidades estruturadas.',
+      },
+      {
+        name: 'get_scanner_opcoes',
+        description:
+          'Lê a aba SCANNER_OPCOES (A1:Z500). ' +
+          'Retorna dados agregados de liquidez e parâmetros de gregas.',
+      },
+      {
+        name: 'get_maiores_lucros',
+        description:
+          'Lê a aba SELECAO_OPCOES_MAIORES_LUCROS (A1:Z500). ' +
+          'Retorna o ranking das estruturas com maior taxa de prêmio teórica.',
+      },
+      {
+        name: 'get_maiores_volumes',
+        description:
+          'Lê a aba SELECAO_MAIORES_VOLUMES (A1:Z500). ' +
+          'Retorna o fluxo de volume de CALLs e PUTs.',
+      },
+      {
+        name: 'get_tendencia_m9m21',
+        description:
+          'Lê a aba RANKING_TENDENCIA_M9M21 (A1:Z500). ' +
+          'Aceita argumento opcional "ticker" (ex: PETR4) para filtrar ' +
+          'a tendência M9M21 de um papel específico.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ticker: {
+              type: 'string',
+              description: 'Código do ativo para filtrar (opcional).',
+            },
+          },
+        },
+      },
+      {
+        name: 'get_correl_ibov',
+        description:
+          'Lê a aba RANKING_CORREL_IBOV (A1:Z500). ' +
+          'Retorna o coeficiente de correlação dos ativos frente ao índice.',
+      },
+    ],
   }));
 
+  // ── Tool execution ─────────────────────────────────────────────────────────
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
+
     try {
-      const result = await handleToolCall(name, args as Record<string, unknown>);
-      return {
-        content: [{ type: 'text', text: result }],
-      };
+      if (!SPREADSHEET_ID) {
+        throw new Error(
+          'SPREADSHEET_ID não configurado. Defina a variável de ambiente antes de iniciar o servidor.',
+        );
+      }
+
+      let result: string;
+
+      switch (name) {
+        // ── COCKPIT ──────────────────────────────────────────────────────────
+        case 'get_cockpit_ativas': {
+          // Range starts at row 10 → rows[0] is the header row (row 10),
+          // rows[1..] are data rows (rows 11–500).
+          const rows = await readSheet('COCKPIT!A10:Z500');
+
+          if (rows.length < 2) {
+            result = JSON.stringify({ data: [], message: 'Nenhum dado encontrado no range COCKPIT!A10:Z500.' });
+            break;
+          }
+
+          const headers = rows[0] as string[];
+          const dataRows = rows.slice(1) as string[][];
+          const objects = rowsToObjects(headers, dataRows);
+
+          // Resolve column keys (case-insensitive partial match).
+          const findKey = (candidates: string[]): string | undefined =>
+            candidates.reduce<string | undefined>((found, candidate) => {
+              if (found) return found;
+              return headers.find((h) => h.toUpperCase().includes(candidate));
+            }, undefined);
+
+          const statusKey    = findKey(['STATUS_OP', 'STATUS']);
+          const vendaKey     = findKey(['VENDA']);
+          const compraKey    = findKey(['COMPRA']);
+          const qtdeKey      = findKey(['QTDE']);
+
+          const filtered = objects.filter((obj) => {
+            const containsAtivo = (key: string | undefined): boolean =>
+              key !== undefined && obj[key]?.toUpperCase().includes('ATIVO') === true;
+
+            const qtdeNaoVazia = qtdeKey !== undefined && obj[qtdeKey]?.trim() !== '';
+
+            return (
+              containsAtivo(statusKey) ||
+              containsAtivo(vendaKey)  ||
+              containsAtivo(compraKey) ||
+              qtdeNaoVazia
+            );
+          });
+
+          result = JSON.stringify(filtered, null, 2);
+          break;
+        }
+
+        // ── SCREENER_QUANTITATIVO ─────────────────────────────────────────
+        case 'get_screener_quantitativo': {
+          const rows = await readSheet('SCREENER_QUANTITATIVO!A1:Z500');
+          if (rows.length < 2) { result = JSON.stringify([]); break; }
+          const [headers, ...dataRows] = rows as [string[], ...string[][]];
+          result = JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
+          break;
+        }
+
+        // ── SCANNER_OPCOES ────────────────────────────────────────────────
+        case 'get_scanner_opcoes': {
+          const rows = await readSheet('SCANNER_OPCOES!A1:Z500');
+          if (rows.length < 2) { result = JSON.stringify([]); break; }
+          const [headers, ...dataRows] = rows as [string[], ...string[][]];
+          result = JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
+          break;
+        }
+
+        // ── MAIORES LUCROS ────────────────────────────────────────────────
+        case 'get_maiores_lucros': {
+          const rows = await readSheet('SELECAO_OPCOES_MAIORES_LUCROS!A1:Z500');
+          if (rows.length < 2) { result = JSON.stringify([]); break; }
+          const [headers, ...dataRows] = rows as [string[], ...string[][]];
+          result = JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
+          break;
+        }
+
+        // ── MAIORES VOLUMES ───────────────────────────────────────────────
+        case 'get_maiores_volumes': {
+          const rows = await readSheet('SELECAO_MAIORES_VOLUMES!A1:Z500');
+          if (rows.length < 2) { result = JSON.stringify([]); break; }
+          const [headers, ...dataRows] = rows as [string[], ...string[][]];
+          result = JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
+          break;
+        }
+
+        // ── TENDÊNCIA M9M21 ───────────────────────────────────────────────
+        case 'get_tendencia_m9m21': {
+          const rows = await readSheet('RANKING_TENDENCIA_M9M21!A1:Z500');
+          if (rows.length < 2) { result = JSON.stringify([]); break; }
+          const [headers, ...dataRows] = rows as [string[], ...string[][]];
+          let objects = rowsToObjects(headers, dataRows);
+
+          const ticker = (args as Record<string, unknown>)['ticker'] as string | undefined;
+          if (ticker && ticker.trim() !== '') {
+            const tickerKey = headers.find(
+              (h) =>
+                h.toUpperCase() === 'TICKER' ||
+                h.toUpperCase() === 'ATIVO'  ||
+                h.toUpperCase().includes('TICKER'),
+            );
+            if (tickerKey) {
+              objects = objects.filter(
+                (obj) => obj[tickerKey]?.toUpperCase() === ticker.trim().toUpperCase(),
+              );
+            }
+          }
+
+          result = JSON.stringify(objects, null, 2);
+          break;
+        }
+
+        // ── CORRELAÇÃO IBOV ───────────────────────────────────────────────
+        case 'get_correl_ibov': {
+          const rows = await readSheet('RANKING_CORREL_IBOV!A1:Z500');
+          if (rows.length < 2) { result = JSON.stringify([]); break; }
+          const [headers, ...dataRows] = rows as [string[], ...string[][]];
+          result = JSON.stringify(rowsToObjects(headers, dataRows), null, 2);
+          break;
+        }
+
+        default:
+          throw new Error(`Ferramenta desconhecida: "${name}"`);
+      }
+
+      return { content: [{ type: 'text', text: result }] };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -283,35 +268,34 @@ function createMcpServer(): Server {
 }
 
 // ---------------------------------------------------------------------------
-// Express + SSE Transport
-// 🚨 CRITICAL: /sse and /messages routes MUST be registered BEFORE any
-//    global JSON parser middleware. Express body-parsers intercept the raw
-//    request stream, which breaks transport.handlePostMessage().
+// Express server
+//
+// CRITICAL: /sse and /messages MUST be registered BEFORE any body-parser
+// middleware. express.json() intercepts the raw request stream, which breaks
+// transport.handlePostMessage() with "stream is not readable".
 // ---------------------------------------------------------------------------
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
 
-// Active SSE transports keyed by sessionId.
 const transports = new Map<string, SSEServerTransport>();
 
-// GET /sse – establish Server-Sent Events connection.
+// GET /sse – open SSE channel
 app.get('/sse', async (req, res) => {
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
 
   transports.set(transport.sessionId, transport);
-
   res.on('close', () => {
     transports.delete(transport.sessionId);
-    console.log(`[SSE] Client disconnected – session ${transport.sessionId} removed.`);
+    console.log(`[SSE] session ${transport.sessionId} disconnected`);
   });
 
-  console.log(`[SSE] New client connected – session ${transport.sessionId}`);
+  console.log(`[SSE] session ${transport.sessionId} connected`);
   await server.connect(transport);
 });
 
-// POST /messages – raw MCP message stream (NO body parser applied before this).
+// POST /messages – raw MCP stream (NO body parser before this route)
 app.post('/messages', async (req, res) => {
   const sessionId = req.query['sessionId'] as string | undefined;
 
@@ -329,7 +313,7 @@ app.post('/messages', async (req, res) => {
   await transport.handlePostMessage(req, res);
 });
 
-// Health-check (JSON parser is safe AFTER the critical routes above).
+// JSON parser is safe only AFTER the critical routes above
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
@@ -337,7 +321,6 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     spreadsheetId: SPREADSHEET_ID || '(not set)',
     activeSessions: transports.size,
-    tools: TOOL_REGISTRY.map((t) => t.name),
   });
 });
 
@@ -346,10 +329,9 @@ app.get('/health', (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Google Sheets MCP Server iniciado`);
-  console.log(`   SSE endpoint : http://localhost:${PORT}/sse`);
-  console.log(`   Messages     : http://localhost:${PORT}/messages`);
-  console.log(`   Health check : http://localhost:${PORT}/health`);
-  console.log(`   Planilha     : ${SPREADSHEET_ID || '(SPREADSHEET_ID não configurado)'}`);
-  console.log(`   Ferramentas  : ${TOOL_REGISTRY.map((t) => t.name).join(', ')}\n`);
+  console.log(`\n🚀 Google Sheets MCP Server running on port ${PORT}`);
+  console.log(`   SSE      → http://localhost:${PORT}/sse`);
+  console.log(`   Messages → http://localhost:${PORT}/messages`);
+  console.log(`   Health   → http://localhost:${PORT}/health`);
+  console.log(`   Sheet    → ${SPREADSHEET_ID || '(SPREADSHEET_ID not set)'}\n`);
 });
