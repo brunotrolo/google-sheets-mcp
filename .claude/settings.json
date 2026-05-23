@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(npm run dev)",
+      "Bash(npm start)",
+      "Bash(npm install)",
+      "Bash(npm install *)",
+      "Bash(npm ci)",
+      "Bash(npx tsc*)",
+      "Bash(node dist/index.js)",
+      "Bash(curl http://localhost:*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add *)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git fetch*)",
+      "Bash(git pull*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(gcloud builds submit*)",
+      "Bash(gcloud run deploy*)",
+      "Bash(gcloud run services describe*)",
+      "Bash(gcloud artifacts repositories*)",
+      "Bash(gcloud secrets*)",
+      "Bash(gcloud auth configure-docker*)",
+      "Bash(docker build*)",
+      "Bash(docker push*)",
+      "Bash(ls*)",
+      "Bash(find . *)",
+      "Bash(grep*)"
+    ]
+  }
+}
