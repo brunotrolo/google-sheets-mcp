@@ -47,7 +47,8 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// Parser tolerante a formatos BR (1.234,56), US (1234.56), R$, % e (x) negativo.
+// Parser tolerante a formatos BR (1.234,56), US (1,234.56), R$, % e (x) negativo.
+// Detecta o formato pela posição do separador mais à direita: ele é o decimal.
 function parseNumberBR(raw: any): number {
   if (raw === undefined || raw === null) return 0;
   let s = String(raw).trim();
@@ -60,13 +61,22 @@ function parseNumberBR(raw: any): number {
   }
   s = s.replace(/R\$/gi, '').replace(/%/g, '').replace(/\s/g, '');
 
-  const hasDot = s.includes('.');
-  const hasComma = s.includes(',');
-  if (hasDot && hasComma) {
-    s = s.replace(/\./g, '').replace(',', '.');
-  } else if (hasComma) {
+  const lastDot = s.lastIndexOf('.');
+  const lastComma = s.lastIndexOf(',');
+
+  if (lastDot >= 0 && lastComma >= 0) {
+    if (lastComma > lastDot) {
+      // BR: 1.234,56 — . é milhar, , é decimal
+      s = s.replace(/\./g, '').replace(',', '.');
+    } else {
+      // US: 1,234.56 — , é milhar, . é decimal
+      s = s.replace(/,/g, '');
+    }
+  } else if (lastComma >= 0) {
+    // Só vírgula: assume decimal BR
     s = s.replace(',', '.');
   }
+  // Só ponto ou sem separador: parse direto
 
   const n = parseFloat(s);
   if (Number.isNaN(n)) return 0;
@@ -107,6 +117,34 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ['ticker']
         }
+      },
+      {
+        name: 'get_resumo_por_ativo',
+        description: 'Resumo histórico consolidado de um ticker da aba COCKPIT. Inclui total de operações (por status), prêmio bruto de vendas, custo de proteções, prêmio líquido total, P&L realizado, P&L MTM das ativas, win rate, maior ganho e maior perda. Também devolve as posições ativas do ativo.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ticker: { type: 'string', description: 'Código do ativo (obrigatório). Ex: "EMBJ3".' }
+          },
+          required: ['ticker']
+        }
+      },
+      {
+        name: 'get_dashboard_mensal',
+        description: 'Dashboard de performance para um mês específico da aba COCKPIT. Calcula prêmio bruto/líquido, P&L realizado, contagens, win rate, melhor/pior operação (OPTION_TICKER), comparativo com o mês anterior (variação % do prêmio líquido), e quebra por ticker dentro do mês.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mes: { type: 'string', description: 'Mês a consultar (obrigatório). Casado com TRADE_MONTH. Ex: "5".' },
+            ano: { type: 'string', description: 'Ano para o período/comparativo. Opcional — usa o ano atual se omitido. Ex: "2026".' }
+          },
+          required: ['mes']
+        }
+      },
+      {
+        name: 'get_alertas_posicoes',
+        description: 'Avalia as posições ATIVAS de venda da aba COCKPIT e retorna alertas classificados por nível de risco (CRITICO, ALERTA, AVISO). Critérios consideram DTE (dias até o vencimento, calculado a partir de EXPIRY vs. hoje), MONEYNESS (ITM/ATM) e relação PL_VALUE / MAX_GAIN. Cada alerta inclui ação sugerida.',
+        inputSchema: { type: 'object', properties: {} }
       },
       {
         name: 'get_screener_quantitativo',
@@ -152,6 +190,9 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     else if (name === 'get_cockpit_historico') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_resumo_mensal') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_cockpit_por_ativo') range = 'COCKPIT!A10:Z500';
+    else if (name === 'get_resumo_por_ativo') range = 'COCKPIT!A10:Z500';
+    else if (name === 'get_dashboard_mensal') range = 'COCKPIT!A10:Z500';
+    else if (name === 'get_alertas_posicoes') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_screener_quantitativo') range = 'SCREENER_QUANTITATIVO!A1:Z200';
     else if (name === 'get_scanner_opcoes') range = 'SCANNER_OPCOES!A1:Z500';
     else if (name === 'get_maiores_lucros') range = 'SELECAO_OPCOES_MAIORES_LUCROS!A1:Z200';
@@ -244,6 +285,292 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           qtde_encerradas: b.qtde_encerradas,
           qtde_ativas: b.qtde_ativas,
         }));
+    } else if (name === 'get_resumo_por_ativo') {
+      const a = args as any;
+      const ticker = typeof a.ticker === 'string' ? String(a.ticker).trim().toUpperCase() : '';
+      if (ticker === '') throw new Error('Parâmetro "ticker" é obrigatório.');
+
+      const filtered = data.filter(item => String(item['TICKER'] || '').trim().toUpperCase() === ticker);
+
+      const statusOf = (item: any) => String(statusHeader ? item[statusHeader] : '').trim().toUpperCase();
+      const encerradas = filtered.filter(item => statusOf(item) === 'ENCERRADO');
+      const ativasArr = filtered.filter(item => statusOf(item) === 'ATIVO');
+      const exercidas = filtered.filter(item => statusOf(item) === 'EXERCIDA');
+      const realizadas = encerradas.concat(exercidas);
+
+      const sideOf = (item: any) => String(item['SIDE'] || '').trim().toUpperCase();
+      const premio_bruto_vendas = realizadas
+        .filter(item => sideOf(item) === 'VENDA')
+        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
+      const custo_protecoes = realizadas
+        .filter(item => sideOf(item) === 'COMPRA')
+        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
+      const premio_liquido_total = premio_bruto_vendas + custo_protecoes;
+      const pl_realizado_total = realizadas.reduce((sum, item) => sum + parseNumberBR(item['PL_VALUE']), 0);
+      const pl_ativo_mtm = ativasArr.reduce((sum, item) => sum + parseNumberBR(item['PL_VALUE']), 0);
+
+      const pls_enc = encerradas.map(item => parseNumberBR(item['PL_VALUE']));
+      const wins = pls_enc.filter(v => v > 0).length;
+      const win_rate_pct = encerradas.length > 0 ? (wins / encerradas.length) * 100 : 0;
+      const maior_ganho = pls_enc.length > 0 ? Math.max(...pls_enc) : 0;
+      const maior_perda = pls_enc.length > 0 ? Math.min(...pls_enc) : 0;
+
+      // Posições ativas: mesma lógica de get_cockpit_ativas, restrita a este ticker
+      const posicoes_ativas = filtered.filter(item => {
+        const s = String(item['STATUS'] || item['STATUS_OP'] || item['VENDA/COMPRA'] || '').toUpperCase();
+        return s.includes('ATIVO') || (item['QTDE'] && item['QTDE'] !== '' && !s.includes('ENCERRADO'));
+      });
+
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      data = {
+        ticker,
+        resumo_historico: {
+          total_operacoes: filtered.length,
+          encerradas: encerradas.length,
+          ativas: ativasArr.length,
+          exercidas: exercidas.length,
+          premio_bruto_vendas: round2(premio_bruto_vendas),
+          custo_protecoes: round2(custo_protecoes),
+          premio_liquido_total: round2(premio_liquido_total),
+          pl_realizado: round2(pl_realizado_total),
+          pl_ativo_mtm: round2(pl_ativo_mtm),
+          win_rate_pct: round2(win_rate_pct),
+          maior_ganho: round2(maior_ganho),
+          maior_perda: round2(maior_perda),
+        },
+        posicoes_ativas,
+      } as any;
+    } else if (name === 'get_dashboard_mensal') {
+      const a = args as any;
+      const mes = typeof a.mes === 'string' ? String(a.mes).trim() : '';
+      if (mes === '') throw new Error('Parâmetro "mes" é obrigatório.');
+      const ano = typeof a.ano === 'string' && a.ano.trim() !== ''
+        ? String(a.ano).trim()
+        : String(new Date().getFullYear());
+
+      const mesNum = parseInt(mes, 10);
+      const anoNum = parseInt(ano, 10);
+      const periodoStr = `${String(mesNum).padStart(2, '0')}/${anoNum}`;
+
+      // Mês anterior (rola para dezembro do ano anterior se aplicável)
+      let mesAnt = mesNum - 1;
+      let anoAnt = anoNum;
+      if (mesAnt < 1) { mesAnt = 12; anoAnt -= 1; }
+      const periodoAntStr = `${String(mesAnt).padStart(2, '0')}/${anoAnt}`;
+
+      const statusOf = (item: any) => String(statusHeader ? item[statusHeader] : '').trim().toUpperCase();
+      const sideOf = (item: any) => String(item['SIDE'] || '').trim().toUpperCase();
+
+      const filterMes = (m: string) => data.filter(item => String(item['TRADE_MONTH'] || '').trim() === m);
+      const linhasMes = filterMes(mes);
+      const linhasAnt = filterMes(String(mesAnt));
+
+      const encerradas = linhasMes.filter(item => {
+        const s = statusOf(item);
+        return s === 'ENCERRADO' || s === 'EXERCIDA';
+      });
+      const ativasArr = linhasMes.filter(item => statusOf(item) === 'ATIVO');
+
+      const premio_bruto_vendas = encerradas
+        .filter(item => sideOf(item) === 'VENDA')
+        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
+      const custo_protecoes = encerradas
+        .filter(item => sideOf(item) === 'COMPRA')
+        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
+      const premio_liquido = premio_bruto_vendas + custo_protecoes;
+      const pl_realizado = encerradas.reduce((sum, item) => sum + parseNumberBR(item['PL_VALUE']), 0);
+
+      const pls = encerradas.map(item => parseNumberBR(item['PL_VALUE']));
+      const wins = pls.filter(v => v > 0).length;
+      const win_rate_encerradas_pct = encerradas.length > 0 ? (wins / encerradas.length) * 100 : 0;
+      const maior_ganho_mes = pls.length > 0 ? Math.max(...pls) : 0;
+      const maior_perda_mes = pls.length > 0 ? Math.min(...pls) : 0;
+
+      // melhor/pior operação: OPTION_TICKER com max/min PL entre encerradas
+      let melhor_operacao = '';
+      let pior_operacao = '';
+      if (encerradas.length > 0) {
+        let melhorPL = -Infinity, piorPL = Infinity;
+        for (const item of encerradas) {
+          const pl = parseNumberBR(item['PL_VALUE']);
+          const ot = String(item['OPTION_TICKER'] || item['TICKER'] || '').trim();
+          if (pl > melhorPL) { melhorPL = pl; melhor_operacao = ot; }
+          if (pl < piorPL)  { piorPL = pl;  pior_operacao  = ot; }
+        }
+      }
+
+      // Comparativo: prêmio líquido do mês anterior
+      const encerradasAnt = linhasAnt.filter(item => {
+        const s = statusOf(item);
+        return s === 'ENCERRADO' || s === 'EXERCIDA';
+      });
+      const premioBrutoVendasAnt = encerradasAnt
+        .filter(item => sideOf(item) === 'VENDA')
+        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
+      const custoProtecoesAnt = encerradasAnt
+        .filter(item => sideOf(item) === 'COMPRA')
+        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
+      const premio_liquido_anterior = premioBrutoVendasAnt + custoProtecoesAnt;
+      const variacao_pct = premio_liquido_anterior !== 0
+        ? ((premio_liquido - premio_liquido_anterior) / Math.abs(premio_liquido_anterior)) * 100
+        : 0;
+
+      // Agrupamento por ticker dentro do mês
+      type PorAtivo = { ticker: string; operacoes: number; premio_liquido: number; pl_realizado: number };
+      const porAtivoMap = new Map<string, PorAtivo>();
+      for (const item of linhasMes) {
+        const t = String(item['TICKER'] || '').trim().toUpperCase();
+        if (t === '') continue;
+        let pa = porAtivoMap.get(t);
+        if (!pa) { pa = { ticker: t, operacoes: 0, premio_liquido: 0, pl_realizado: 0 }; porAtivoMap.set(t, pa); }
+        pa.operacoes += 1;
+        const s = statusOf(item);
+        if (s === 'ENCERRADO' || s === 'EXERCIDA') {
+          pa.premio_liquido += parseNumberBR(item['MAX_GAIN']);
+          pa.pl_realizado   += parseNumberBR(item['PL_VALUE']);
+        }
+      }
+
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      data = {
+        periodo: periodoStr,
+        performance: {
+          premio_bruto_vendas: round2(premio_bruto_vendas),
+          custo_protecoes: round2(custo_protecoes),
+          premio_liquido: round2(premio_liquido),
+          pl_realizado: round2(pl_realizado),
+          qtde_encerradas: encerradas.length,
+          qtde_ativas: ativasArr.length,
+          win_rate_encerradas_pct: round2(win_rate_encerradas_pct),
+          maior_ganho_mes: round2(maior_ganho_mes),
+          maior_perda_mes: round2(maior_perda_mes),
+          melhor_operacao,
+          pior_operacao,
+        },
+        comparativo_mes_anterior: {
+          mes_anterior: periodoAntStr,
+          premio_liquido_anterior: round2(premio_liquido_anterior),
+          variacao_pct: round2(variacao_pct),
+        },
+        por_ativo: Array.from(porAtivoMap.values()).map(p => ({
+          ticker: p.ticker,
+          operacoes: p.operacoes,
+          premio_liquido: round2(p.premio_liquido),
+          pl_realizado: round2(p.pl_realizado),
+        })),
+      } as any;
+    } else if (name === 'get_alertas_posicoes') {
+      // Posições ATIVAS via mesma lógica de get_cockpit_ativas
+      const ativasArr = data.filter(item => {
+        const s = String(item['STATUS'] || item['STATUS_OP'] || item['VENDA/COMPRA'] || '').toUpperCase();
+        return s.includes('ATIVO') || (item['QTDE'] && item['QTDE'] !== '' && !s.includes('ENCERRADO'));
+      });
+
+      // DTE: dias entre EXPIRY e hoje. Aceita YYYY-MM-DD ou DD/MM/YYYY.
+      const hoje = new Date();
+      hoje.setHours(0, 0, 0, 0);
+      const parseDate = (raw: string): Date | null => {
+        if (!raw) return null;
+        const s = String(raw).trim();
+        let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+        if (m) return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+        m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) return new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+        return null;
+      };
+
+      interface Alerta {
+        nivel: 'CRITICO' | 'ALERTA' | 'AVISO';
+        motivo: string;
+        descricao: string;
+        opcao: string;
+        ticker: string;
+        side: string;
+        dte: number;
+        strike: number;
+        spot: number;
+        moneyness: string;
+        pl_value: number;
+        acao_sugerida: string;
+      }
+      const criticos: Alerta[] = [];
+      const alertas: Alerta[] = [];
+      const avisos:   Alerta[] = [];
+      let saudaveis = 0;
+
+      for (const item of ativasArr) {
+        const side = String(item['SIDE'] || '').trim().toUpperCase();
+        // Regras se aplicam apenas a SIDE = VENDA
+        if (side !== 'VENDA') { saudaveis += 1; continue; }
+
+        const opcao  = String(item['OPTION_TICKER'] || item['TICKER'] || '').trim();
+        const ticker = String(item['TICKER'] || '').trim();
+        const expiry = parseDate(String(item['EXPIRY'] || ''));
+        const dte = expiry ? Math.ceil((expiry.getTime() - hoje.getTime()) / 86400000) : -1;
+        const strike = parseNumberBR(item['STRIKE']);
+        const spot   = parseNumberBR(item['SPOT']);
+        const moneyness = String(item['MONEYNESS'] || '').trim().toUpperCase();
+        const plValue = parseNumberBR(item['PL_VALUE']);
+        const maxGain = parseNumberBR(item['MAX_GAIN']);
+
+        const base = { opcao, ticker, side, dte, strike, spot, moneyness, pl_value: plValue };
+
+        // CRITICO
+        if (dte > 0 && dte < 10) {
+          criticos.push({ ...base, nivel: 'CRITICO', motivo: 'DTE_CRITICO',
+            descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Encerrar urgente' });
+          continue;
+        }
+        if (moneyness === 'ITM' && dte > 0 && dte < 20) {
+          criticos.push({ ...base, nivel: 'CRITICO', motivo: 'ITM_DTE_CRITICO',
+            descricao: `${opcao} ITM com ${dte} dias`, acao_sugerida: 'Avaliar encerramento' });
+          continue;
+        }
+        if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain) {
+          criticos.push({ ...base, nivel: 'CRITICO', motivo: 'STOP_ATINGIDO',
+            descricao: `${opcao} com perda > 100% do prêmio máximo`, acao_sugerida: 'Stop atingido — encerrar' });
+          continue;
+        }
+
+        // ALERTA
+        if (moneyness === 'ITM') {
+          alertas.push({ ...base, nivel: 'ALERTA', motivo: 'ITM',
+            descricao: `${opcao} está ITM`, acao_sugerida: 'Monitorar diariamente' });
+          continue;
+        }
+        if (dte >= 10 && dte <= 21) {
+          alertas.push({ ...base, nivel: 'ALERTA', motivo: 'DTE_MEDIO',
+            descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Planejar manejo' });
+          continue;
+        }
+        if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain * 0.5 && Math.abs(plValue) <= maxGain) {
+          alertas.push({ ...base, nivel: 'ALERTA', motivo: 'PL_NEGATIVO_50_100',
+            descricao: `${opcao} perda entre 50% e 100% do prêmio máximo`, acao_sugerida: 'Planejar manejo' });
+          continue;
+        }
+
+        // AVISO
+        if (dte >= 22 && dte <= 30) {
+          avisos.push({ ...base, nivel: 'AVISO', motivo: 'DTE_MODERADO',
+            descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Acompanhar' });
+          continue;
+        }
+        if (moneyness === 'ATM') {
+          avisos.push({ ...base, nivel: 'AVISO', motivo: 'ATM',
+            descricao: `${opcao} está ATM`, acao_sugerida: 'Acompanhar' });
+          continue;
+        }
+
+        saudaveis += 1;
+      }
+
+      data = {
+        total_alertas: criticos.length + alertas.length + avisos.length,
+        criticos,
+        alertas,
+        avisos,
+        saudaveis,
+      } as any;
     }
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
   } catch (error: any) {
