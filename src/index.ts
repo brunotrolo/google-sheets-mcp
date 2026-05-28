@@ -1,12 +1,15 @@
 import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
+import { randomUUID } from 'node:crypto';
 
 dotenv.config();
 
@@ -606,6 +609,106 @@ app.post('/messages', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Streamable HTTP transport (MCP spec 2025-03-26+)
+//
+// O Claude Web e clientes modernos usam exclusivamente o transporte
+// "Streamable HTTP": POST + DELETE no MESMO endpoint, com session id em
+// header `mcp-session-id`. O legacy SSE (GET /sse + POST /messages) acima
+// fica para retro-compat com curl/clientes antigos.
+//
+// O StreamableHTTPServerTransport precisa do body já parseado, por isso
+// usamos `express.json()` LOCAL na rota — não global. A regra crítica
+// continua valendo: nenhum body-parser pode rodar antes do POST /messages
+// legacy, que lê o stream bruto.
+// ---------------------------------------------------------------------------
+
+interface StreamableEntry {
+  server: Server;
+  transport: StreamableHTTPServerTransport;
+}
+const streamableSessions = new Map<string, StreamableEntry>();
+
+async function closeStreamableSession(sessionId: string, reason: string): Promise<void> {
+  const entry = streamableSessions.get(sessionId);
+  if (!entry) return;
+  streamableSessions.delete(sessionId);
+  console.log(`[StreamHTTP] closing ${sessionId} (${reason}); active=${streamableSessions.size}`);
+  try { await entry.server.close(); }    catch (err) { console.warn(`[StreamHTTP] server.close() falhou (${sessionId}):`, err); }
+  try { await entry.transport.close(); } catch (err) { console.warn(`[StreamHTTP] transport.close() falhou (${sessionId}):`, err); }
+}
+
+const streamableJsonParser = express.json();
+
+// 3. POST /sse — Streamable HTTP (initialize cria sessão; requisições
+//    subsequentes usam o header mcp-session-id).
+app.post('/sse', streamableJsonParser, async (req, res) => {
+  const headerSessionId = req.headers['mcp-session-id'];
+  const sessionId = typeof headerSessionId === 'string' ? headerSessionId : undefined;
+
+  let entry: StreamableEntry;
+
+  if (sessionId && streamableSessions.has(sessionId)) {
+    entry = streamableSessions.get(sessionId)!;
+  } else if (!sessionId && isInitializeRequest(req.body)) {
+    const mcpServer = createMcpServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sid) => {
+        streamableSessions.set(sid, { server: mcpServer, transport });
+        console.log(`[StreamHTTP] session ${sid} initialized; active=${streamableSessions.size}`);
+      },
+    });
+
+    transport.onclose = () => {
+      const sid = transport.sessionId;
+      if (sid) void closeStreamableSession(sid, 'transport onclose');
+    };
+
+    try {
+      await mcpServer.connect(transport);
+    } catch (err) {
+      console.error(`[StreamHTTP] server.connect() falhou:`, err);
+      try { await mcpServer.close(); } catch { /* ignore */ }
+      if (!res.headersSent) res.status(500).end();
+      return;
+    }
+
+    entry = { server: mcpServer, transport };
+  } else {
+    res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Bad Request: no valid session id and not an initialize request' },
+      id: null,
+    });
+    return;
+  }
+
+  try {
+    await entry.transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error(`[StreamHTTP] handleRequest falhou:`, err);
+    if (!res.headersSent) res.status(500).end();
+  }
+});
+
+// 4. DELETE /sse — encerra sessão Streamable HTTP.
+app.delete('/sse', async (req, res) => {
+  const headerSessionId = req.headers['mcp-session-id'];
+  const sessionId = typeof headerSessionId === 'string' ? headerSessionId : undefined;
+  if (!sessionId || !streamableSessions.has(sessionId)) {
+    res.status(404).send('Session not found');
+    return;
+  }
+  const entry = streamableSessions.get(sessionId)!;
+  try {
+    await entry.transport.handleRequest(req, res);
+  } catch (err) {
+    console.error(`[StreamHTTP] DELETE falhou (${sessionId}):`, err);
+    if (!res.headersSent) res.status(500).end();
+  }
+});
+
 // JSON parser só é seguro DEPOIS das rotas críticas acima
 app.use(express.json());
 
@@ -613,7 +716,8 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     spreadsheetId: SPREADSHEET_ID || '(not set)',
-    activeSessions: activeTransports.size,
+    legacySseSessions: activeTransports.size,
+    streamableHttpSessions: streamableSessions.size,
   });
 });
 
@@ -627,8 +731,8 @@ app.listen(PORT, () => {
   console.log(`\n🚀 Google Sheets MCP Server running on port ${PORT}`);
   console.log(`   Build    → ${BUILD_ID} (per-request Server lifecycle)`);
   console.log(`   Started  → ${new Date().toISOString()}`);
-  console.log(`   SSE      → http://localhost:${PORT}/sse`);
-  console.log(`   Messages → http://localhost:${PORT}/messages`);
-  console.log(`   Health   → http://localhost:${PORT}/health`);
-  console.log(`   Sheet    → ${SPREADSHEET_ID || '(SPREADSHEET_ID not set)'}\n`);
+  console.log(`   Streamable HTTP → POST/DELETE http://localhost:${PORT}/sse  (Claude Web)`);
+  console.log(`   Legacy SSE      → GET http://localhost:${PORT}/sse + POST /messages`);
+  console.log(`   Health          → http://localhost:${PORT}/health`);
+  console.log(`   Sheet           → ${SPREADSHEET_ID || '(SPREADSHEET_ID not set)'}\n`);
 });
