@@ -51,6 +51,34 @@ function rowsToObjects(
   });
 }
 
+// Parser tolerante a formatos BR (1.234,56), US (1234.56), R$, % e (x) negativo.
+function parseNumberBR(raw: string | undefined): number {
+  if (raw === undefined || raw === null) return 0;
+  let s = String(raw).trim();
+  if (s === '') return 0;
+
+  let negative = false;
+  if (s.startsWith('(') && s.endsWith(')')) {
+    negative = true;
+    s = s.slice(1, -1);
+  }
+
+  s = s.replace(/R\$/gi, '').replace(/%/g, '').replace(/\s/g, '');
+
+  const hasDot = s.includes('.');
+  const hasComma = s.includes(',');
+
+  if (hasDot && hasComma) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else if (hasComma) {
+    s = s.replace(',', '.');
+  }
+
+  const n = parseFloat(s);
+  if (Number.isNaN(n)) return 0;
+  return negative ? -n : n;
+}
+
 // ---------------------------------------------------------------------------
 // MCP Server factory – one instance per SSE connection
 // ---------------------------------------------------------------------------
@@ -70,6 +98,21 @@ function createMcpServer(): Server {
           'Lê a aba COCKPIT (range A10:Z500, cabeçalhos na linha 10). ' +
           'Retorna apenas posições onde STATUS, STATUS_OP, VENDA ou COMPRA ' +
           'contêm "ATIVO", ou onde QTDE é diferente de vazio.',
+      },
+      {
+        name: 'get_cockpit_historico',
+        description:
+          'Lê a aba COCKPIT (range A10:Z500, cabeçalhos na linha 10). ' +
+          'Retorna todas as linhas cujo STATUS é ENCERRADO ou EXERCIDA, ' +
+          'com todos os campos (incluindo TRADE_MONTH, MAX_GAIN, PL_VALUE, SIDE).',
+      },
+      {
+        name: 'get_cockpit_resumo_mensal',
+        description:
+          'Resumo mensal das operações encerradas/exercidas da aba COCKPIT, ' +
+          'agrupado por TRADE_MONTH. Para cada mês retorna a soma de MAX_GAIN ' +
+          'por SIDE (VENDA/COMPRA), prêmio líquido, P&L realizado e quantidade ' +
+          'de operações.',
       },
       {
         name: 'get_screener_quantitativo',
@@ -176,6 +219,118 @@ function createMcpServer(): Server {
           });
 
           result = JSON.stringify(filtered, null, 2);
+          break;
+        }
+
+        // ── COCKPIT HISTÓRICO ────────────────────────────────────────────────
+        case 'get_cockpit_historico': {
+          const rows = await readSheet('COCKPIT!A10:Z500');
+
+          if (rows.length < 2) {
+            result = JSON.stringify([]);
+            break;
+          }
+
+          const headers = rows[0] as string[];
+          const dataRows = rows.slice(1) as string[][];
+          const objects = rowsToObjects(headers, dataRows);
+
+          // STATUS column = primeiro header contendo "STATUS" mas NÃO "STATUS_OP".
+          const statusKey = headers.find(
+            (h) => h.toUpperCase().includes('STATUS') && !h.toUpperCase().includes('STATUS_OP'),
+          );
+
+          const filtered = statusKey
+            ? objects.filter((obj) => {
+                const v = (obj[statusKey] ?? '').trim().toUpperCase();
+                return v === 'ENCERRADO' || v === 'EXERCIDA';
+              })
+            : [];
+
+          result = JSON.stringify(filtered, null, 2);
+          break;
+        }
+
+        // ── COCKPIT RESUMO MENSAL ────────────────────────────────────────────
+        case 'get_cockpit_resumo_mensal': {
+          const rows = await readSheet('COCKPIT!A10:Z500');
+
+          if (rows.length < 2) {
+            result = JSON.stringify([]);
+            break;
+          }
+
+          const headers = rows[0] as string[];
+          const dataRows = rows.slice(1) as string[][];
+          const objects = rowsToObjects(headers, dataRows);
+
+          const statusKey = headers.find(
+            (h) => h.toUpperCase().includes('STATUS') && !h.toUpperCase().includes('STATUS_OP'),
+          );
+          const tradeMonthKey = headers.find((h) => h.toUpperCase().includes('TRADE_MONTH'));
+          const maxGainKey    = headers.find((h) => h.toUpperCase() === 'MAX_GAIN');
+          const plValueKey    = headers.find((h) => h.toUpperCase() === 'PL_VALUE');
+          const sideKey       = headers.find((h) => h.toUpperCase() === 'SIDE');
+
+          if (!statusKey || !tradeMonthKey || !maxGainKey || !plValueKey || !sideKey) {
+            throw new Error(
+              `Colunas obrigatórias ausentes na aba COCKPIT. Encontradas: ` +
+              `STATUS=${statusKey}, TRADE_MONTH=${tradeMonthKey}, ` +
+              `MAX_GAIN=${maxGainKey}, PL_VALUE=${plValueKey}, SIDE=${sideKey}.`,
+            );
+          }
+
+          interface Bucket {
+            trade_month: string;
+            max_gain_venda: number;
+            max_gain_compra: number;
+            pl_realizado: number;
+            qtde_operacoes: number;
+          }
+          const buckets = new Map<string, Bucket>();
+
+          for (const obj of objects) {
+            const status = (obj[statusKey] ?? '').trim().toUpperCase();
+            if (status !== 'ENCERRADO' && status !== 'EXERCIDA') continue;
+
+            const month = (obj[tradeMonthKey] ?? '').trim();
+            if (month === '') continue;
+
+            const side    = (obj[sideKey] ?? '').trim().toUpperCase();
+            const maxGain = parseNumberBR(obj[maxGainKey]);
+            const plValue = parseNumberBR(obj[plValueKey]);
+
+            let bucket = buckets.get(month);
+            if (!bucket) {
+              bucket = {
+                trade_month: month,
+                max_gain_venda: 0,
+                max_gain_compra: 0,
+                pl_realizado: 0,
+                qtde_operacoes: 0,
+              };
+              buckets.set(month, bucket);
+            }
+
+            if (side === 'VENDA')  bucket.max_gain_venda  += maxGain;
+            if (side === 'COMPRA') bucket.max_gain_compra += maxGain;
+            bucket.pl_realizado += plValue;
+            bucket.qtde_operacoes += 1;
+          }
+
+          const round2 = (n: number) => Math.round(n * 100) / 100;
+          const resumo = Array.from(buckets.values())
+            .sort((a, b) => a.trade_month.localeCompare(b.trade_month))
+            .map((b) => ({
+              trade_month: b.trade_month,
+              max_gain_venda:  round2(b.max_gain_venda),
+              max_gain_compra: round2(b.max_gain_compra),
+              premio_liquido:  round2(b.max_gain_venda + b.max_gain_compra),
+              pl_realizado:    round2(b.pl_realizado),
+              qtde_operacoes:  b.qtde_operacoes,
+            }));
+
+          result = JSON.stringify(resumo, null, 2);
           break;
         }
 
