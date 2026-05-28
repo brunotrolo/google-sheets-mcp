@@ -654,6 +654,10 @@ app.post('/sse', streamableJsonParser, async (req, res) => {
     const mcpServer = createMcpServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
+      // Retorna application/json direto em vez de wrapper SSE.
+      // Mais compatível com clientes que tratam POST como request/response
+      // simples (Claude Web, MCP Inspector, etc.).
+      enableJsonResponse: true,
       onsessioninitialized: (sid) => {
         streamableSessions.set(sid, { server: mcpServer, transport });
         console.log(`[StreamHTTP] session ${sid} initialized; active=${streamableSessions.size}`);
