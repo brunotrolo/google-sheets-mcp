@@ -204,6 +204,39 @@ Detalhes operacionais em `.claude/rules/mcp-compatibility.md`.
 
 ---
 
+### Bug 4 — `ENOENT: no such file or directory open '/app/config/credentials.json'`
+
+**Sintoma:** Conector lista as ferramentas normalmente, mas qualquer
+`tools/call` retorna erro de credencial. Logs do Cloud Run mostram
+`ENOENT` tentando abrir `/app/config/credentials.json`.
+
+**Causa:** O `credentials.json` está em `.gitignore`. Quando o deploy usa
+`gcloud run deploy --source .`, o Cloud Build **não envia** arquivos
+gitignored, e o arquivo não chega no container. Imagens antigas que
+funcionavam foram buildadas por outro fluxo (com o arquivo presente
+localmente antes do `.gitignore` ou via cópia manual).
+
+**Solução — Secret Manager mount:** Colocar o JSON no Secret Manager e
+montá-lo como arquivo no path que o código já espera. Sem mudar uma
+linha de código.
+
+```bash
+gcloud secrets create sheets-credentials --data-file=<caminho>/credentials.json
+gcloud secrets add-iam-policy-binding sheets-credentials \
+  --member="serviceAccount:<PROJECT_NUMBER>-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+gcloud run services update oplab-sheets-mcp --region=us-east1 \
+  --update-secrets=/app/config/credentials.json=sheets-credentials:latest
+```
+
+O mount é configurado no serviço (não na revisão), então **persiste em
+redeploys subsequentes** — só precisa fazer uma vez. Procedimento
+completo (incluindo extração de credenciais de uma imagem antiga e
+rotação) em `.claude/rules/infra.md` → "Credenciais do Google Sheets —
+Mount como arquivo".
+
+---
+
 ## Guia de Deploy no GCP
 
 ### Pré-requisitos

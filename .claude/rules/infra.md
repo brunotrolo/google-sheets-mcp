@@ -139,6 +139,101 @@ gcloud run deploy ... --set-env-vars="SPREADSHEET_ID=1BxiMVs0XRA5nFMdKvBdBZjgmUU
 
 ---
 
+## Credenciais do Google Sheets — Mount como arquivo
+
+O código autentica via `keyFile: path.join(process.cwd(), 'config', 'credentials.json')`.
+Esse arquivo **NÃO** está no git (gitignored) e portanto **não é enviado no
+`--source .`** — confirmado na regressão pós-PR #12 onde todas as 10
+ferramentas retornaram `ENOENT: no such file or directory open '/app/config/credentials.json'`.
+
+A solução é colocar o JSON no Secret Manager e montá-lo como arquivo no path
+que o código espera. Sem mudar uma linha de código, sem novo build.
+
+### Setup inicial (uma vez por projeto)
+
+Se for a primeira vez (Secret Manager não habilitado), `gcloud secrets create`
+pergunta se deve habilitar a API — responda `y`.
+
+```bash
+# 1) Obter o credentials.json
+# - Se você tem localmente: pule pro passo 2
+# - Se a versão atual em prod tem (e você não tem cópia local):
+gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
+IMG=$(gcloud run services describe oplab-sheets-mcp --region=us-east1 \
+       --format='value(spec.template.spec.containers[0].image)')
+docker pull "$IMG"
+CID=$(docker create "$IMG")
+docker cp "$CID:/app/config/credentials.json" /tmp/credentials.json
+docker rm "$CID"
+
+# 2) Criar o secret
+gcloud secrets create sheets-credentials \
+  --data-file=/tmp/credentials.json \
+  --replication-policy=automatic
+
+# 3) Permissão para o Cloud Run ler o secret
+PROJECT_NUMBER=$(gcloud projects describe oplab-sheets-mcp-project \
+  --format='value(projectNumber)')
+gcloud secrets add-iam-policy-binding sheets-credentials \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+# 4) Montar no serviço como arquivo
+gcloud run services update oplab-sheets-mcp --region=us-east1 \
+  --update-secrets=/app/config/credentials.json=sheets-credentials:latest
+
+# 5) Apagar a cópia local (segurança)
+rm /tmp/credentials.json
+```
+
+### Em deploys subsequentes
+
+Uma vez montado via `--update-secrets`, a configuração persiste entre revisões.
+**Não precisa repetir nada nos próximos `gcloud run deploy --source .`** — o
+mount fica anexado ao serviço, não à revisão.
+
+### Rotacionar credenciais
+
+```bash
+# Sobe nova versão do secret (a anterior fica disponível, mas não usada)
+gcloud secrets versions add sheets-credentials --data-file=/tmp/novo-credentials.json
+rm /tmp/novo-credentials.json
+
+# O mount usa `:latest` por padrão, então o novo valor é pego na próxima revisão.
+# Para forçar imediatamente sem fazer deploy novo:
+gcloud run services update oplab-sheets-mcp --region=us-east1 \
+  --update-secrets=/app/config/credentials.json=sheets-credentials:latest
+```
+
+### Como verificar que está montado
+
+```bash
+gcloud run services describe oplab-sheets-mcp --region=us-east1 \
+  --format='yaml(spec.template.spec.volumes,spec.template.spec.containers[0].volumeMounts)'
+```
+
+Esperado: um volume `secret-sheets-credentials` com `secretName: sheets-credentials`, e um `volumeMount` em `/app/config/credentials.json`.
+
+### Por que não Application Default Credentials (ADC)?
+
+O Cloud Run injeta automaticamente as credenciais da Service Account via ADC,
+o que dispensaria o arquivo. **Mas o código usa `keyFile` explícito** —
+trocar para ADC exigiria mudar `src/index.ts`, e a regra vigente é
+"não tocar em código sem necessidade" (lição PR #6-#11). Se um dia o código
+precisar ser refatorado por outra razão, vale considerar:
+
+```typescript
+// Alternativa futura — sem arquivo, sem secret, autenticação automática
+const auth = new google.auth.GoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+});
+```
+
+Nesse caso, dar `roles/sheets.viewer` (ou compartilhar a planilha como
+viewer) com a Service Account `<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`.
+
+---
+
 ## Imagem Docker
 
 - **Base:** `node:20-slim` (alinhada com a imagem de produção)
@@ -157,9 +252,10 @@ IMAGE=us-east1-docker.pkg.dev/<PROJECT_ID>/cloud-run-source-deploy/oplab-sheets-
 Antes de executar `gcloud run deploy`, confirme:
 
 - [ ] `npm run build` passou sem erros
-- [ ] Os secrets necessários existem no Secret Manager
+- [ ] Secrets necessários existem no Secret Manager (`SPREADSHEET_ID` e `sheets-credentials`)
 - [ ] A Service Account do Cloud Run tem `roles/secretmanager.secretAccessor`
-- [ ] A Service Account tem `roles/sheets.viewer` na planilha
+- [ ] A Service Account tem acesso (`viewer` ou via compartilhamento) à planilha
+- [ ] O serviço tem o mount `--update-secrets=/app/config/credentials.json=sheets-credentials:latest` ativo (persistente — verifique com `gcloud run services describe`)
 - [ ] Flag `--no-cpu-throttling` está presente
 - [ ] Flag `--timeout=3600` está presente
 - [ ] Flag `--clear-base-image` está presente (quando usar `--source .`)
