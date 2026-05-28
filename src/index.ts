@@ -519,8 +519,8 @@ const PORT = Number(process.env.PORT ?? 3000);
 // Ciclo de vida das sessões SSE
 //
 // Arquitetura:
-//   • `transports` — Map<sessionId, { server, transport }> com TODAS as
-//     conexões vivas. O `server` fica acoplado a uma única `transport`;
+//   • `activeTransports` — Map<sessionId, { server, transport }> com TODAS
+//     as conexões vivas. O `server` fica acoplado a uma única `transport`;
 //     ambos morrem juntos.
 //   • GET /sse — cria SSEServerTransport + Server NOVOS, registra no map,
 //     chama `server.connect(transport)`. Limpa em qualquer evento de término.
@@ -538,14 +538,14 @@ interface SessionEntry {
   transport: SSEServerTransport;
 }
 
-const transports = new Map<string, SessionEntry>();
+const activeTransports = new Map<string, SessionEntry>();
 
 async function closeSession(sessionId: string, reason: string): Promise<void> {
-  const entry = transports.get(sessionId);
-  if (!entry) return;                       // já fechada — idempotente
-  transports.delete(sessionId);             // remove ANTES de fechar para
-                                            // bloquear reentradas de eventos
-  console.log(`[SSE] closing ${sessionId} (${reason}); active=${transports.size}`);
+  const entry = activeTransports.get(sessionId);
+  if (!entry) return;                             // já fechada — idempotente
+  activeTransports.delete(sessionId);             // remove ANTES de fechar para
+                                                  // bloquear reentradas de eventos
+  console.log(`[SSE] closing ${sessionId} (${reason}); active=${activeTransports.size}`);
 
   try {
     await entry.server.close();
@@ -560,18 +560,22 @@ async function closeSession(sessionId: string, reason: string): Promise<void> {
 }
 
 // 1. GET /sse — abre canal SSE
-app.get('/sse', async (_req, res) => {
-  // Instâncias NOVAS por requisição. Não mover para o escopo do módulo.
-  const transport = new SSEServerTransport('/messages', res);
-  const server    = createMcpServer();
-  const sessionId = transport.sessionId;
+app.get('/sse', async (req, res) => {
+  // Instâncias NOVAS por requisição. NÃO mover para o escopo do módulo —
+  // o Protocol do SDK lança "Already connected to a transport" se a mesma
+  // instância de Server receber .connect() duas vezes.
+  const sseTransport = new SSEServerTransport('/messages', res);
+  const mcpServer    = createMcpServer();
+  const sessionId    = sseTransport.sessionId;
 
-  transports.set(sessionId, { server, transport });
-  res.on('close', () => { void closeSession(sessionId, 'res close'); });
+  activeTransports.set(sessionId, { server: mcpServer, transport: sseTransport });
+
+  // Limpa o map quando a conexão cair, evitando vazamento de memória.
+  req.on('close', () => { void closeSession(sessionId, 'req close'); });
 
   try {
-    await server.connect(transport);
-    console.log(`[SSE] session ${sessionId} connected; active=${transports.size}`);
+    await mcpServer.connect(sseTransport);
+    console.log(`[SSE] session ${sessionId} connected; active=${activeTransports.size}`);
   } catch (err) {
     console.error(`[SSE] server.connect() falhou (${sessionId}):`, err);
     await closeSession(sessionId, 'connect failed');
@@ -581,15 +585,15 @@ app.get('/sse', async (_req, res) => {
 
 // 2. POST /messages — stream bruto do MCP (sem body parser antes desta rota)
 app.post('/messages', async (req, res) => {
-  const sessionId = req.query['sessionId'] as string | undefined;
-  if (!sessionId) {
-    res.status(400).send('Missing sessionId query parameter.');
+  const sessionId = req.query['sessionId'];
+  if (!sessionId || typeof sessionId !== 'string') {
+    res.status(400).send('Session ID ausente ou inválido');
     return;
   }
 
-  const entry = transports.get(sessionId);
+  const entry = activeTransports.get(sessionId);
   if (!entry) {
-    res.status(404).send(`Session "${sessionId}" not found.`);
+    res.status(404).send('Sessão SSE expirada ou não encontrada');
     return;
   }
 
@@ -609,7 +613,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     spreadsheetId: SPREADSHEET_ID || '(not set)',
-    activeSessions: transports.size,
+    activeSessions: activeTransports.size,
   });
 });
 
