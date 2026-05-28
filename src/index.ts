@@ -88,9 +88,20 @@ function parseNumberBR(raw: string | undefined): number {
 
 // ---------------------------------------------------------------------------
 // MCP Server factory – one instance per SSE connection
+//
+// ⚠️ CRÍTICO: NUNCA mova `new Server(...)` para o escopo do módulo.
+// A classe Protocol (superclasse de Server) guarda `_transport` em estado
+// interno e lança "Already connected to a transport" se `connect()` for
+// chamado numa instância que já foi conectada. Cada requisição /sse precisa
+// receber uma instância 100% nova.
 // ---------------------------------------------------------------------------
 
+let __serverInstanceCounter = 0;
+
 function createMcpServer(): Server {
+  const id = ++__serverInstanceCounter;
+  console.log(`[MCP] createMcpServer() → instância #${id}`);
+
   const server = new Server(
     { name: 'google-sheets-mcp', version: '1.0.0' },
     { capabilities: { tools: {} } },
@@ -504,103 +515,101 @@ function createMcpServer(): Server {
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
 
-// Sessão MCP = par (server, transport) criados juntos no /sse e fechados juntos
-// em qualquer término. Cada conexão SSE tem sua própria instância de Server —
-// o Protocol do SDK lança "Already connected to a transport" se a mesma
-// instância de Server for reconectada, então um par dedicado por sessão é
-// obrigatório.
-interface Session {
-  transport: SSEServerTransport;
+// ---------------------------------------------------------------------------
+// Ciclo de vida das sessões SSE
+//
+// Arquitetura:
+//   • `transports` — Map<sessionId, { server, transport }> com TODAS as
+//     conexões vivas. O `server` fica acoplado a uma única `transport`;
+//     ambos morrem juntos.
+//   • GET /sse — cria SSEServerTransport + Server NOVOS, registra no map,
+//     chama `server.connect(transport)`. Limpa em qualquer evento de término.
+//   • POST /messages — usa req.query.sessionId para achar o transport e
+//     repassa req/res para `transport.handlePostMessage()`.
+//
+// Por que isso evita "Already connected to a transport":
+//   O guard do SDK lança o erro quando `Protocol._transport` já está setado.
+//   Como `createMcpServer()` retorna uma instância NOVA a cada /sse, nenhuma
+//   instância de Server é reaproveitada — o guard nunca pode disparar.
+// ---------------------------------------------------------------------------
+
+interface SessionEntry {
   server: Server;
+  transport: SSEServerTransport;
 }
 
-const sessions = new Map<string, Session>();
+const transports = new Map<string, SessionEntry>();
 
 async function closeSession(sessionId: string, reason: string): Promise<void> {
-  const session = sessions.get(sessionId);
-  if (!session) return;
-  sessions.delete(sessionId);
-  console.log(`[SSE] closing session ${sessionId} (${reason})`);
+  const entry = transports.get(sessionId);
+  if (!entry) return;                       // já fechada — idempotente
+  transports.delete(sessionId);             // remove ANTES de fechar para
+                                            // bloquear reentradas de eventos
+  console.log(`[SSE] closing ${sessionId} (${reason}); active=${transports.size}`);
+
   try {
-    await session.server.close();
+    await entry.server.close();
   } catch (err) {
     console.warn(`[SSE] server.close() falhou (${sessionId}):`, err);
   }
   try {
-    await session.transport.close();
+    await entry.transport.close();
   } catch (err) {
     console.warn(`[SSE] transport.close() falhou (${sessionId}):`, err);
   }
 }
 
-// GET /sse – open SSE channel
+// 1. GET /sse — abre canal SSE
 app.get('/sse', async (_req, res) => {
+  // Instâncias NOVAS por requisição. Não mover para o escopo do módulo.
   const transport = new SSEServerTransport('/messages', res);
-  const server = createMcpServer();
+  const server    = createMcpServer();
   const sessionId = transport.sessionId;
 
-  // sessionId é UUID — colisão é improvável mas, se acontecer, fecha a antiga
-  // antes de registrar a nova para não deixar Server/Transport órfãos.
-  if (sessions.has(sessionId)) {
-    await closeSession(sessionId, 'duplicate sessionId');
-  }
-
-  sessions.set(sessionId, { transport, server });
-
-  // Encerramento idempotente — qualquer um dos três caminhos fecha a sessão.
+  transports.set(sessionId, { server, transport });
   res.on('close', () => { void closeSession(sessionId, 'res close'); });
-  transport.onclose = () => { void closeSession(sessionId, 'transport onclose'); };
-  transport.onerror = (err) => {
-    console.warn(`[SSE] transport.onerror (${sessionId}):`, err);
-    void closeSession(sessionId, 'transport onerror');
-  };
 
   try {
-    console.log(`[SSE] session ${sessionId} connected`);
     await server.connect(transport);
+    console.log(`[SSE] session ${sessionId} connected; active=${transports.size}`);
   } catch (err) {
     console.error(`[SSE] server.connect() falhou (${sessionId}):`, err);
     await closeSession(sessionId, 'connect failed');
-    if (!res.headersSent) {
-      res.status(500).end();
-    }
+    if (!res.headersSent) res.status(500).end();
   }
 });
 
-// POST /messages – raw MCP stream (NO body parser before this route)
+// 2. POST /messages — stream bruto do MCP (sem body parser antes desta rota)
 app.post('/messages', async (req, res) => {
   const sessionId = req.query['sessionId'] as string | undefined;
-
   if (!sessionId) {
     res.status(400).send('Missing sessionId query parameter.');
     return;
   }
 
-  const session = sessions.get(sessionId);
-  if (!session) {
+  const entry = transports.get(sessionId);
+  if (!entry) {
     res.status(404).send(`Session "${sessionId}" not found.`);
     return;
   }
 
   try {
-    await session.transport.handlePostMessage(req, res);
+    await entry.transport.handlePostMessage(req, res);
   } catch (err) {
     console.error(`[SSE] handlePostMessage falhou (${sessionId}):`, err);
-    if (!res.headersSent) {
-      res.status(500).end();
-    }
+    if (!res.headersSent) res.status(500).end();
     await closeSession(sessionId, 'handlePostMessage failed');
   }
 });
 
-// JSON parser is safe only AFTER the critical routes above
+// JSON parser só é seguro DEPOIS das rotas críticas acima
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     spreadsheetId: SPREADSHEET_ID || '(not set)',
-    activeSessions: sessions.size,
+    activeSessions: transports.size,
   });
 });
 
@@ -608,8 +617,12 @@ app.get('/health', (_req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 
+const BUILD_ID = process.env.BUILD_ID ?? 'dev';
+
 app.listen(PORT, () => {
   console.log(`\n🚀 Google Sheets MCP Server running on port ${PORT}`);
+  console.log(`   Build    → ${BUILD_ID} (per-request Server lifecycle)`);
+  console.log(`   Started  → ${new Date().toISOString()}`);
   console.log(`   SSE      → http://localhost:${PORT}/sse`);
   console.log(`   Messages → http://localhost:${PORT}/messages`);
   console.log(`   Health   → http://localhost:${PORT}/health`);
