@@ -299,13 +299,16 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       const realizadas = encerradas.concat(exercidas);
 
       const sideOf = (item: any) => String(item['SIDE'] || '').trim().toUpperCase();
-      const premio_bruto_vendas = realizadas
+      // Prêmios somam TODAS as operações do ticker (ativas + encerradas + exercidas),
+      // não só as realizadas — refletem a exposição total já contratada.
+      const premio_bruto_vendas = filtered
         .filter(item => sideOf(item) === 'VENDA')
         .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
-      const custo_protecoes = realizadas
+      const custo_protecoes = filtered
         .filter(item => sideOf(item) === 'COMPRA')
         .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
       const premio_liquido_total = premio_bruto_vendas + custo_protecoes;
+      // P&L realizado segue só nas encerradas/exercidas
       const pl_realizado_total = realizadas.reduce((sum, item) => sum + parseNumberBR(item['PL_VALUE']), 0);
       const pl_ativo_mtm = ativasArr.reduce((sum, item) => sum + parseNumberBR(item['PL_VALUE']), 0);
 
@@ -361,37 +364,86 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       const statusOf = (item: any) => String(statusHeader ? item[statusHeader] : '').trim().toUpperCase();
       const sideOf = (item: any) => String(item['SIDE'] || '').trim().toUpperCase();
 
-      const filterMes = (m: string) => data.filter(item => String(item['TRADE_MONTH'] || '').trim() === m);
-      const linhasMes = filterMes(mes);
-      const linhasAnt = filterMes(String(mesAnt));
+      // Match flexível de TRADE_MONTH: aceita "5", "05", "5/2026", "05/2026",
+      // "2026-05", "2026-5", "2026/05", "2026/5".
+      const matchMonth = (tmRaw: string, m: number, y: number): boolean => {
+        const tm = String(tmRaw || '').trim();
+        if (tm === '') return false;
+        const mStr = String(m);
+        const mPad = mStr.padStart(2, '0');
+        const yStr = String(y);
+        return (
+          tm === mStr || tm === mPad ||
+          tm === `${mPad}/${yStr}` || tm === `${mStr}/${yStr}` ||
+          tm === `${yStr}-${mPad}` || tm === `${yStr}-${mStr}` ||
+          tm === `${yStr}/${mPad}` || tm === `${yStr}/${mStr}`
+        );
+      };
 
-      const encerradas = linhasMes.filter(item => {
+      // Itera UMA vez por todo o data, agregando os dois meses (corrente + anterior)
+      // e também as linhas do mês corrente para os campos derivados (melhor/pior, por_ativo).
+      interface Bucket {
+        max_gain_venda: number;
+        max_gain_compra: number;
+        pl_realizado: number;
+        qtde_encerradas: number;
+        qtde_ativas: number;
+      }
+      const novoBucket = (): Bucket => ({ max_gain_venda: 0, max_gain_compra: 0, pl_realizado: 0, qtde_encerradas: 0, qtde_ativas: 0 });
+      const cur = novoBucket();
+      const ant = novoBucket();
+      const linhasMes: any[] = [];
+
+      for (const item of data) {
+        const tm = String(item['TRADE_MONTH'] || '').trim();
+        if (tm === '') continue;
+        const isCur = matchMonth(tm, mesNum, anoNum);
+        const isAnt = matchMonth(tm, mesAnt, anoAnt);
+        if (!isCur && !isAnt) continue;
+
+        const status = statusOf(item);
+        const targets: Bucket[] = [];
+        if (isCur) targets.push(cur);
+        if (isAnt) targets.push(ant);
+
+        if (status === 'ENCERRADO' || status === 'EXERCIDA') {
+          const side = sideOf(item);
+          const mg = parseNumberBR(item['MAX_GAIN']);
+          const pl = parseNumberBR(item['PL_VALUE']);
+          for (const b of targets) {
+            if (side === 'VENDA') b.max_gain_venda += mg;
+            if (side === 'COMPRA') b.max_gain_compra += mg;
+            b.pl_realizado += pl;
+            b.qtde_encerradas += 1;
+          }
+        } else if (status === 'ATIVO') {
+          for (const b of targets) b.qtde_ativas += 1;
+        }
+
+        if (isCur) linhasMes.push(item);
+      }
+
+      const premio_bruto_vendas = cur.max_gain_venda;
+      const custo_protecoes     = cur.max_gain_compra;
+      const premio_liquido      = premio_bruto_vendas + custo_protecoes;
+      const pl_realizado        = cur.pl_realizado;
+
+      // Estatísticas das encerradas do mês corrente (a partir das linhasMes)
+      const encerradasMes = linhasMes.filter(item => {
         const s = statusOf(item);
         return s === 'ENCERRADO' || s === 'EXERCIDA';
       });
-      const ativasArr = linhasMes.filter(item => statusOf(item) === 'ATIVO');
-
-      const premio_bruto_vendas = encerradas
-        .filter(item => sideOf(item) === 'VENDA')
-        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
-      const custo_protecoes = encerradas
-        .filter(item => sideOf(item) === 'COMPRA')
-        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
-      const premio_liquido = premio_bruto_vendas + custo_protecoes;
-      const pl_realizado = encerradas.reduce((sum, item) => sum + parseNumberBR(item['PL_VALUE']), 0);
-
-      const pls = encerradas.map(item => parseNumberBR(item['PL_VALUE']));
+      const pls = encerradasMes.map(item => parseNumberBR(item['PL_VALUE']));
       const wins = pls.filter(v => v > 0).length;
-      const win_rate_encerradas_pct = encerradas.length > 0 ? (wins / encerradas.length) * 100 : 0;
+      const win_rate_encerradas_pct = encerradasMes.length > 0 ? (wins / encerradasMes.length) * 100 : 0;
       const maior_ganho_mes = pls.length > 0 ? Math.max(...pls) : 0;
       const maior_perda_mes = pls.length > 0 ? Math.min(...pls) : 0;
 
-      // melhor/pior operação: OPTION_TICKER com max/min PL entre encerradas
       let melhor_operacao = '';
       let pior_operacao = '';
-      if (encerradas.length > 0) {
+      if (encerradasMes.length > 0) {
         let melhorPL = -Infinity, piorPL = Infinity;
-        for (const item of encerradas) {
+        for (const item of encerradasMes) {
           const pl = parseNumberBR(item['PL_VALUE']);
           const ot = String(item['OPTION_TICKER'] || item['TICKER'] || '').trim();
           if (pl > melhorPL) { melhorPL = pl; melhor_operacao = ot; }
@@ -399,37 +451,41 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      // Comparativo: prêmio líquido do mês anterior
-      const encerradasAnt = linhasAnt.filter(item => {
-        const s = statusOf(item);
-        return s === 'ENCERRADO' || s === 'EXERCIDA';
-      });
-      const premioBrutoVendasAnt = encerradasAnt
-        .filter(item => sideOf(item) === 'VENDA')
-        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
-      const custoProtecoesAnt = encerradasAnt
-        .filter(item => sideOf(item) === 'COMPRA')
-        .reduce((sum, item) => sum + parseNumberBR(item['MAX_GAIN']), 0);
-      const premio_liquido_anterior = premioBrutoVendasAnt + custoProtecoesAnt;
+      const premio_liquido_anterior = ant.max_gain_venda + ant.max_gain_compra;
       const variacao_pct = premio_liquido_anterior !== 0
         ? ((premio_liquido - premio_liquido_anterior) / Math.abs(premio_liquido_anterior)) * 100
         : 0;
 
-      // Agrupamento por ticker dentro do mês
-      type PorAtivo = { ticker: string; operacoes: number; premio_liquido: number; pl_realizado: number };
+      // Agrupamento por ticker dentro do mês — mesmo padrão (separa VENDA/COMPRA)
+      type PorAtivo = {
+        ticker: string;
+        operacoes: number;
+        max_gain_venda: number;
+        max_gain_compra: number;
+        pl_realizado: number;
+      };
       const porAtivoMap = new Map<string, PorAtivo>();
       for (const item of linhasMes) {
         const t = String(item['TICKER'] || '').trim().toUpperCase();
         if (t === '') continue;
         let pa = porAtivoMap.get(t);
-        if (!pa) { pa = { ticker: t, operacoes: 0, premio_liquido: 0, pl_realizado: 0 }; porAtivoMap.set(t, pa); }
+        if (!pa) {
+          pa = { ticker: t, operacoes: 0, max_gain_venda: 0, max_gain_compra: 0, pl_realizado: 0 };
+          porAtivoMap.set(t, pa);
+        }
         pa.operacoes += 1;
         const s = statusOf(item);
         if (s === 'ENCERRADO' || s === 'EXERCIDA') {
-          pa.premio_liquido += parseNumberBR(item['MAX_GAIN']);
-          pa.pl_realizado   += parseNumberBR(item['PL_VALUE']);
+          const side = sideOf(item);
+          const mg = parseNumberBR(item['MAX_GAIN']);
+          if (side === 'VENDA')  pa.max_gain_venda  += mg;
+          if (side === 'COMPRA') pa.max_gain_compra += mg;
+          pa.pl_realizado += parseNumberBR(item['PL_VALUE']);
         }
       }
+
+      const encerradas = encerradasMes; // alias para consistência abaixo
+      const ativasArr = linhasMes.filter(item => statusOf(item) === 'ATIVO');
 
       const round2 = (n: number) => Math.round(n * 100) / 100;
       data = {
@@ -455,7 +511,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         por_ativo: Array.from(porAtivoMap.values()).map(p => ({
           ticker: p.ticker,
           operacoes: p.operacoes,
-          premio_liquido: round2(p.premio_liquido),
+          premio_liquido: round2(p.max_gain_venda + p.max_gain_compra),
           pl_realizado: round2(p.pl_realizado),
         })),
       } as any;
