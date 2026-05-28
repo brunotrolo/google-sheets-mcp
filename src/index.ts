@@ -504,21 +504,67 @@ function createMcpServer(): Server {
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
 
-const transports = new Map<string, SSEServerTransport>();
+// Sessão MCP = par (server, transport) criados juntos no /sse e fechados juntos
+// em qualquer término. Cada conexão SSE tem sua própria instância de Server —
+// o Protocol do SDK lança "Already connected to a transport" se a mesma
+// instância de Server for reconectada, então um par dedicado por sessão é
+// obrigatório.
+interface Session {
+  transport: SSEServerTransport;
+  server: Server;
+}
+
+const sessions = new Map<string, Session>();
+
+async function closeSession(sessionId: string, reason: string): Promise<void> {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  sessions.delete(sessionId);
+  console.log(`[SSE] closing session ${sessionId} (${reason})`);
+  try {
+    await session.server.close();
+  } catch (err) {
+    console.warn(`[SSE] server.close() falhou (${sessionId}):`, err);
+  }
+  try {
+    await session.transport.close();
+  } catch (err) {
+    console.warn(`[SSE] transport.close() falhou (${sessionId}):`, err);
+  }
+}
 
 // GET /sse – open SSE channel
-app.get('/sse', async (req, res) => {
+app.get('/sse', async (_req, res) => {
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
+  const sessionId = transport.sessionId;
 
-  transports.set(transport.sessionId, transport);
-  res.on('close', () => {
-    transports.delete(transport.sessionId);
-    console.log(`[SSE] session ${transport.sessionId} disconnected`);
-  });
+  // sessionId é UUID — colisão é improvável mas, se acontecer, fecha a antiga
+  // antes de registrar a nova para não deixar Server/Transport órfãos.
+  if (sessions.has(sessionId)) {
+    await closeSession(sessionId, 'duplicate sessionId');
+  }
 
-  console.log(`[SSE] session ${transport.sessionId} connected`);
-  await server.connect(transport);
+  sessions.set(sessionId, { transport, server });
+
+  // Encerramento idempotente — qualquer um dos três caminhos fecha a sessão.
+  res.on('close', () => { void closeSession(sessionId, 'res close'); });
+  transport.onclose = () => { void closeSession(sessionId, 'transport onclose'); };
+  transport.onerror = (err) => {
+    console.warn(`[SSE] transport.onerror (${sessionId}):`, err);
+    void closeSession(sessionId, 'transport onerror');
+  };
+
+  try {
+    console.log(`[SSE] session ${sessionId} connected`);
+    await server.connect(transport);
+  } catch (err) {
+    console.error(`[SSE] server.connect() falhou (${sessionId}):`, err);
+    await closeSession(sessionId, 'connect failed');
+    if (!res.headersSent) {
+      res.status(500).end();
+    }
+  }
 });
 
 // POST /messages – raw MCP stream (NO body parser before this route)
@@ -530,13 +576,21 @@ app.post('/messages', async (req, res) => {
     return;
   }
 
-  const transport = transports.get(sessionId);
-  if (!transport) {
+  const session = sessions.get(sessionId);
+  if (!session) {
     res.status(404).send(`Session "${sessionId}" not found.`);
     return;
   }
 
-  await transport.handlePostMessage(req, res);
+  try {
+    await session.transport.handlePostMessage(req, res);
+  } catch (err) {
+    console.error(`[SSE] handlePostMessage falhou (${sessionId}):`, err);
+    if (!res.headersSent) {
+      res.status(500).end();
+    }
+    await closeSession(sessionId, 'handlePostMessage failed');
+  }
 });
 
 // JSON parser is safe only AFTER the critical routes above
@@ -546,7 +600,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     spreadsheetId: SPREADSHEET_ID || '(not set)',
-    activeSessions: transports.size,
+    activeSessions: sessions.size,
   });
 });
 
