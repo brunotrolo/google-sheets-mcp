@@ -10,7 +10,14 @@ permitindo análise de performance histórica sem export manual de CSV.
 
 ## Input
 
-Nenhum argumento. (Sem `inputSchema`.)
+Dois filtros opcionais (todos via `inputSchema`):
+
+| Parâmetro     | Tipo   | Semântica                                                          |
+|---------------|--------|--------------------------------------------------------------------|
+| `trade_month` | string | Substring case-sensitive aplicada sobre o campo `TRADE_MONTH`. Ex: `"5"` casa `"2024-05"`; `"2024-05"` casa exato. |
+| `ticker`      | string | Match exato (uppercase, trimmed) contra o campo `TICKER`. Ex: `"EMBJ3"`. |
+
+Ambos opcionais e combináveis (AND).
 
 ## Origem dos dados
 

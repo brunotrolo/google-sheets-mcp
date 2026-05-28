@@ -51,6 +51,13 @@ function rowsToObjects(
   });
 }
 
+// Header "STATUS" da aba COCKPIT, excluindo STATUS_OP (status operacional intra-dia).
+function findStatusKey(headers: string[]): string | undefined {
+  return headers.find(
+    (h) => h.toUpperCase().includes('STATUS') && !h.toUpperCase().includes('STATUS_OP'),
+  );
+}
+
 // Parser tolerante a formatos BR (1.234,56), US (1234.56), R$, % e (x) negativo.
 function parseNumberBR(raw: string | undefined): number {
   if (raw === undefined || raw === null) return 0;
@@ -96,23 +103,55 @@ function createMcpServer(): Server {
         name: 'get_cockpit_ativas',
         description:
           'Lê a aba COCKPIT (range A10:Z500, cabeçalhos na linha 10). ' +
-          'Retorna apenas posições onde STATUS, STATUS_OP, VENDA ou COMPRA ' +
-          'contêm "ATIVO", ou onde QTDE é diferente de vazio.',
+          'Retorna apenas posições com STATUS = ATIVO. Cada linha inclui ' +
+          'todos os campos da aba — entre eles STATUS e TRADE_MONTH.',
       },
       {
         name: 'get_cockpit_historico',
         description:
           'Lê a aba COCKPIT (range A10:Z500, cabeçalhos na linha 10). ' +
           'Retorna todas as linhas cujo STATUS é ENCERRADO ou EXERCIDA, ' +
-          'com todos os campos (incluindo TRADE_MONTH, MAX_GAIN, PL_VALUE, SIDE).',
+          'com todos os campos (incluindo TRADE_MONTH, MAX_GAIN, PL_VALUE, SIDE). ' +
+          'Aceita filtros opcionais "trade_month" (ex: "5" ou "2024-05") e ' +
+          '"ticker" (ex: "EMBJ3").',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            trade_month: {
+              type: 'string',
+              description:
+                'Filtra por TRADE_MONTH. Aceita match exato ou substring (ex: "5" casa "2024-05").',
+            },
+            ticker: {
+              type: 'string',
+              description: 'Filtra pelo código do ativo na coluna TICKER (ex: PETR4).',
+            },
+          },
+        },
       },
       {
-        name: 'get_cockpit_resumo_mensal',
+        name: 'get_resumo_mensal',
         description:
-          'Resumo mensal das operações encerradas/exercidas da aba COCKPIT, ' +
-          'agrupado por TRADE_MONTH. Para cada mês retorna a soma de MAX_GAIN ' +
-          'por SIDE (VENDA/COMPRA), prêmio líquido, P&L realizado e quantidade ' +
-          'de operações.',
+          'Resumo mensal das operações da aba COCKPIT, agrupado por TRADE_MONTH. ' +
+          'Para cada mês retorna a soma de MAX_GAIN por SIDE (prêmio bruto VENDA e ' +
+          'custo de proteção COMPRA), prêmio líquido, P&L realizado, quantidade de ' +
+          'encerradas/exercidas e quantidade de ativas. Ordenado cronologicamente.',
+      },
+      {
+        name: 'get_cockpit_por_ativo',
+        description:
+          'Retorna todas as posições da aba COCKPIT (ativas + encerradas + exercidas) ' +
+          'filtradas por TICKER. Útil para visualizar o histórico completo de um ativo.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ticker: {
+              type: 'string',
+              description: 'Código do ativo (obrigatório). Ex: "EMBJ3".',
+            },
+          },
+          required: ['ticker'],
+        },
       },
       {
         name: 'get_screener_quantitativo',
@@ -177,7 +216,7 @@ function createMcpServer(): Server {
       let result: string;
 
       switch (name) {
-        // ── COCKPIT ──────────────────────────────────────────────────────────
+        // ── COCKPIT ATIVAS ───────────────────────────────────────────────────
         case 'get_cockpit_ativas': {
           // Range starts at row 10 → rows[0] is the header row (row 10),
           // rows[1..] are data rows (rows 11–500).
@@ -192,31 +231,10 @@ function createMcpServer(): Server {
           const dataRows = rows.slice(1) as string[][];
           const objects = rowsToObjects(headers, dataRows);
 
-          // Resolve column keys (case-insensitive partial match).
-          const findKey = (candidates: string[]): string | undefined =>
-            candidates.reduce<string | undefined>((found, candidate) => {
-              if (found) return found;
-              return headers.find((h) => h.toUpperCase().includes(candidate));
-            }, undefined);
-
-          const statusKey    = findKey(['STATUS_OP', 'STATUS']);
-          const vendaKey     = findKey(['VENDA']);
-          const compraKey    = findKey(['COMPRA']);
-          const qtdeKey      = findKey(['QTDE']);
-
-          const filtered = objects.filter((obj) => {
-            const containsAtivo = (key: string | undefined): boolean =>
-              key !== undefined && obj[key]?.toUpperCase().includes('ATIVO') === true;
-
-            const qtdeNaoVazia = qtdeKey !== undefined && obj[qtdeKey]?.trim() !== '';
-
-            return (
-              containsAtivo(statusKey) ||
-              containsAtivo(vendaKey)  ||
-              containsAtivo(compraKey) ||
-              qtdeNaoVazia
-            );
-          });
+          const statusKey = findStatusKey(headers);
+          const filtered = statusKey
+            ? objects.filter((obj) => (obj[statusKey] ?? '').trim().toUpperCase() === 'ATIVO')
+            : [];
 
           result = JSON.stringify(filtered, null, 2);
           break;
@@ -235,24 +253,72 @@ function createMcpServer(): Server {
           const dataRows = rows.slice(1) as string[][];
           const objects = rowsToObjects(headers, dataRows);
 
-          // STATUS column = primeiro header contendo "STATUS" mas NÃO "STATUS_OP".
-          const statusKey = headers.find(
-            (h) => h.toUpperCase().includes('STATUS') && !h.toUpperCase().includes('STATUS_OP'),
-          );
+          const statusKey     = findStatusKey(headers);
+          const tradeMonthKey = headers.find((h) => h.toUpperCase().includes('TRADE_MONTH'));
+          const tickerKey     = headers.find((h) => h.toUpperCase() === 'TICKER');
 
-          const filtered = statusKey
+          const argObj   = args as Record<string, unknown>;
+          const argMonth = typeof argObj['trade_month'] === 'string' ? (argObj['trade_month'] as string).trim() : '';
+          const argTicker = typeof argObj['ticker']     === 'string' ? (argObj['ticker']     as string).trim() : '';
+
+          let filtered = statusKey
             ? objects.filter((obj) => {
                 const v = (obj[statusKey] ?? '').trim().toUpperCase();
                 return v === 'ENCERRADO' || v === 'EXERCIDA';
               })
             : [];
 
+          if (argMonth !== '' && tradeMonthKey) {
+            filtered = filtered.filter((obj) =>
+              (obj[tradeMonthKey] ?? '').toString().includes(argMonth),
+            );
+          }
+
+          if (argTicker !== '' && tickerKey) {
+            const t = argTicker.toUpperCase();
+            filtered = filtered.filter((obj) =>
+              (obj[tickerKey] ?? '').toString().trim().toUpperCase() === t,
+            );
+          }
+
           result = JSON.stringify(filtered, null, 2);
           break;
         }
 
-        // ── COCKPIT RESUMO MENSAL ────────────────────────────────────────────
-        case 'get_cockpit_resumo_mensal': {
+        // ── COCKPIT POR ATIVO ────────────────────────────────────────────────
+        case 'get_cockpit_por_ativo': {
+          const argObj = args as Record<string, unknown>;
+          const ticker = typeof argObj['ticker'] === 'string' ? (argObj['ticker'] as string).trim() : '';
+          if (ticker === '') {
+            throw new Error('Parâmetro "ticker" é obrigatório.');
+          }
+
+          const rows = await readSheet('COCKPIT!A10:Z500');
+          if (rows.length < 2) {
+            result = JSON.stringify([]);
+            break;
+          }
+
+          const headers = rows[0] as string[];
+          const dataRows = rows.slice(1) as string[][];
+          const objects = rowsToObjects(headers, dataRows);
+
+          const tickerKey = headers.find((h) => h.toUpperCase() === 'TICKER');
+          if (!tickerKey) {
+            throw new Error('Coluna TICKER não encontrada na aba COCKPIT.');
+          }
+
+          const t = ticker.toUpperCase();
+          const filtered = objects.filter((obj) =>
+            (obj[tickerKey] ?? '').toString().trim().toUpperCase() === t,
+          );
+
+          result = JSON.stringify(filtered, null, 2);
+          break;
+        }
+
+        // ── RESUMO MENSAL ────────────────────────────────────────────────────
+        case 'get_resumo_mensal': {
           const rows = await readSheet('COCKPIT!A10:Z500');
 
           if (rows.length < 2) {
@@ -264,9 +330,7 @@ function createMcpServer(): Server {
           const dataRows = rows.slice(1) as string[][];
           const objects = rowsToObjects(headers, dataRows);
 
-          const statusKey = headers.find(
-            (h) => h.toUpperCase().includes('STATUS') && !h.toUpperCase().includes('STATUS_OP'),
-          );
+          const statusKey     = findStatusKey(headers);
           const tradeMonthKey = headers.find((h) => h.toUpperCase().includes('TRADE_MONTH'));
           const maxGainKey    = headers.find((h) => h.toUpperCase() === 'MAX_GAIN');
           const plValueKey    = headers.find((h) => h.toUpperCase() === 'PL_VALUE');
@@ -285,37 +349,43 @@ function createMcpServer(): Server {
             max_gain_venda: number;
             max_gain_compra: number;
             pl_realizado: number;
-            qtde_operacoes: number;
+            qtde_encerradas: number;
+            qtde_ativas: number;
           }
           const buckets = new Map<string, Bucket>();
-
-          for (const obj of objects) {
-            const status = (obj[statusKey] ?? '').trim().toUpperCase();
-            if (status !== 'ENCERRADO' && status !== 'EXERCIDA') continue;
-
-            const month = (obj[tradeMonthKey] ?? '').trim();
-            if (month === '') continue;
-
-            const side    = (obj[sideKey] ?? '').trim().toUpperCase();
-            const maxGain = parseNumberBR(obj[maxGainKey]);
-            const plValue = parseNumberBR(obj[plValueKey]);
-
-            let bucket = buckets.get(month);
-            if (!bucket) {
-              bucket = {
+          const getBucket = (month: string): Bucket => {
+            let b = buckets.get(month);
+            if (!b) {
+              b = {
                 trade_month: month,
                 max_gain_venda: 0,
                 max_gain_compra: 0,
                 pl_realizado: 0,
-                qtde_operacoes: 0,
+                qtde_encerradas: 0,
+                qtde_ativas: 0,
               };
-              buckets.set(month, bucket);
+              buckets.set(month, b);
             }
+            return b;
+          };
 
-            if (side === 'VENDA')  bucket.max_gain_venda  += maxGain;
-            if (side === 'COMPRA') bucket.max_gain_compra += maxGain;
-            bucket.pl_realizado += plValue;
-            bucket.qtde_operacoes += 1;
+          for (const obj of objects) {
+            const status = (obj[statusKey] ?? '').trim().toUpperCase();
+            const month  = (obj[tradeMonthKey] ?? '').trim();
+            if (month === '') continue;
+
+            if (status === 'ENCERRADO' || status === 'EXERCIDA') {
+              const side    = (obj[sideKey] ?? '').trim().toUpperCase();
+              const maxGain = parseNumberBR(obj[maxGainKey]);
+              const plValue = parseNumberBR(obj[plValueKey]);
+              const bucket  = getBucket(month);
+              if (side === 'VENDA')  bucket.max_gain_venda  += maxGain;
+              if (side === 'COMPRA') bucket.max_gain_compra += maxGain;
+              bucket.pl_realizado  += plValue;
+              bucket.qtde_encerradas += 1;
+            } else if (status === 'ATIVO') {
+              getBucket(month).qtde_ativas += 1;
+            }
           }
 
           const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -327,7 +397,8 @@ function createMcpServer(): Server {
               max_gain_compra: round2(b.max_gain_compra),
               premio_liquido:  round2(b.max_gain_venda + b.max_gain_compra),
               pl_realizado:    round2(b.pl_realizado),
-              qtde_operacoes:  b.qtde_operacoes,
+              qtde_encerradas: b.qtde_encerradas,
+              qtde_ativas:     b.qtde_ativas,
             }));
 
           result = JSON.stringify(resumo, null, 2);
