@@ -1,15 +1,12 @@
 import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
-import { randomUUID } from 'node:crypto';
 
 dotenv.config();
 
@@ -54,57 +51,11 @@ function rowsToObjects(
   });
 }
 
-// Header "STATUS" da aba COCKPIT, excluindo STATUS_OP (status operacional intra-dia).
-function findStatusKey(headers: string[]): string | undefined {
-  return headers.find(
-    (h) => h.toUpperCase().includes('STATUS') && !h.toUpperCase().includes('STATUS_OP'),
-  );
-}
-
-// Parser tolerante a formatos BR (1.234,56), US (1234.56), R$, % e (x) negativo.
-function parseNumberBR(raw: string | undefined): number {
-  if (raw === undefined || raw === null) return 0;
-  let s = String(raw).trim();
-  if (s === '') return 0;
-
-  let negative = false;
-  if (s.startsWith('(') && s.endsWith(')')) {
-    negative = true;
-    s = s.slice(1, -1);
-  }
-
-  s = s.replace(/R\$/gi, '').replace(/%/g, '').replace(/\s/g, '');
-
-  const hasDot = s.includes('.');
-  const hasComma = s.includes(',');
-
-  if (hasDot && hasComma) {
-    s = s.replace(/\./g, '').replace(',', '.');
-  } else if (hasComma) {
-    s = s.replace(',', '.');
-  }
-
-  const n = parseFloat(s);
-  if (Number.isNaN(n)) return 0;
-  return negative ? -n : n;
-}
-
 // ---------------------------------------------------------------------------
 // MCP Server factory – one instance per SSE connection
-//
-// ⚠️ CRÍTICO: NUNCA mova `new Server(...)` para o escopo do módulo.
-// A classe Protocol (superclasse de Server) guarda `_transport` em estado
-// interno e lança "Already connected to a transport" se `connect()` for
-// chamado numa instância que já foi conectada. Cada requisição /sse precisa
-// receber uma instância 100% nova.
 // ---------------------------------------------------------------------------
 
-let __serverInstanceCounter = 0;
-
 function createMcpServer(): Server {
-  const id = ++__serverInstanceCounter;
-  console.log(`[MCP] createMcpServer() → instância #${id}`);
-
   const server = new Server(
     { name: 'google-sheets-mcp', version: '1.0.0' },
     { capabilities: { tools: {} } },
@@ -117,55 +68,8 @@ function createMcpServer(): Server {
         name: 'get_cockpit_ativas',
         description:
           'Lê a aba COCKPIT (range A10:Z500, cabeçalhos na linha 10). ' +
-          'Retorna apenas posições com STATUS = ATIVO. Cada linha inclui ' +
-          'todos os campos da aba — entre eles STATUS e TRADE_MONTH.',
-      },
-      {
-        name: 'get_cockpit_historico',
-        description:
-          'Lê a aba COCKPIT (range A10:Z500, cabeçalhos na linha 10). ' +
-          'Retorna todas as linhas cujo STATUS é ENCERRADO ou EXERCIDA, ' +
-          'com todos os campos (incluindo TRADE_MONTH, MAX_GAIN, PL_VALUE, SIDE). ' +
-          'Aceita filtros opcionais "trade_month" (ex: "5" ou "2024-05") e ' +
-          '"ticker" (ex: "EMBJ3").',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            trade_month: {
-              type: 'string',
-              description:
-                'Filtra por TRADE_MONTH. Aceita match exato ou substring (ex: "5" casa "2024-05").',
-            },
-            ticker: {
-              type: 'string',
-              description: 'Filtra pelo código do ativo na coluna TICKER (ex: PETR4).',
-            },
-          },
-        },
-      },
-      {
-        name: 'get_resumo_mensal',
-        description:
-          'Resumo mensal das operações da aba COCKPIT, agrupado por TRADE_MONTH. ' +
-          'Para cada mês retorna a soma de MAX_GAIN por SIDE (prêmio bruto VENDA e ' +
-          'custo de proteção COMPRA), prêmio líquido, P&L realizado, quantidade de ' +
-          'encerradas/exercidas e quantidade de ativas. Ordenado cronologicamente.',
-      },
-      {
-        name: 'get_cockpit_por_ativo',
-        description:
-          'Retorna todas as posições da aba COCKPIT (ativas + encerradas + exercidas) ' +
-          'filtradas por TICKER. Útil para visualizar o histórico completo de um ativo.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticker: {
-              type: 'string',
-              description: 'Código do ativo (obrigatório). Ex: "EMBJ3".',
-            },
-          },
-          required: ['ticker'],
-        },
+          'Retorna apenas posições onde STATUS, STATUS_OP, VENDA ou COMPRA ' +
+          'contêm "ATIVO", ou onde QTDE é diferente de vazio.',
       },
       {
         name: 'get_screener_quantitativo',
@@ -230,7 +134,7 @@ function createMcpServer(): Server {
       let result: string;
 
       switch (name) {
-        // ── COCKPIT ATIVAS ───────────────────────────────────────────────────
+        // ── COCKPIT ──────────────────────────────────────────────────────────
         case 'get_cockpit_ativas': {
           // Range starts at row 10 → rows[0] is the header row (row 10),
           // rows[1..] are data rows (rows 11–500).
@@ -245,177 +149,33 @@ function createMcpServer(): Server {
           const dataRows = rows.slice(1) as string[][];
           const objects = rowsToObjects(headers, dataRows);
 
-          const statusKey = findStatusKey(headers);
-          const filtered = statusKey
-            ? objects.filter((obj) => (obj[statusKey] ?? '').trim().toUpperCase() === 'ATIVO')
-            : [];
+          // Resolve column keys (case-insensitive partial match).
+          const findKey = (candidates: string[]): string | undefined =>
+            candidates.reduce<string | undefined>((found, candidate) => {
+              if (found) return found;
+              return headers.find((h) => h.toUpperCase().includes(candidate));
+            }, undefined);
+
+          const statusKey    = findKey(['STATUS_OP', 'STATUS']);
+          const vendaKey     = findKey(['VENDA']);
+          const compraKey    = findKey(['COMPRA']);
+          const qtdeKey      = findKey(['QTDE']);
+
+          const filtered = objects.filter((obj) => {
+            const containsAtivo = (key: string | undefined): boolean =>
+              key !== undefined && obj[key]?.toUpperCase().includes('ATIVO') === true;
+
+            const qtdeNaoVazia = qtdeKey !== undefined && obj[qtdeKey]?.trim() !== '';
+
+            return (
+              containsAtivo(statusKey) ||
+              containsAtivo(vendaKey)  ||
+              containsAtivo(compraKey) ||
+              qtdeNaoVazia
+            );
+          });
 
           result = JSON.stringify(filtered, null, 2);
-          break;
-        }
-
-        // ── COCKPIT HISTÓRICO ────────────────────────────────────────────────
-        case 'get_cockpit_historico': {
-          const rows = await readSheet('COCKPIT!A10:Z500');
-
-          if (rows.length < 2) {
-            result = JSON.stringify([]);
-            break;
-          }
-
-          const headers = rows[0] as string[];
-          const dataRows = rows.slice(1) as string[][];
-          const objects = rowsToObjects(headers, dataRows);
-
-          const statusKey     = findStatusKey(headers);
-          const tradeMonthKey = headers.find((h) => h.toUpperCase().includes('TRADE_MONTH'));
-          const tickerKey     = headers.find((h) => h.toUpperCase() === 'TICKER');
-
-          const argObj   = args as Record<string, unknown>;
-          const argMonth = typeof argObj['trade_month'] === 'string' ? (argObj['trade_month'] as string).trim() : '';
-          const argTicker = typeof argObj['ticker']     === 'string' ? (argObj['ticker']     as string).trim() : '';
-
-          let filtered = statusKey
-            ? objects.filter((obj) => {
-                const v = (obj[statusKey] ?? '').trim().toUpperCase();
-                return v === 'ENCERRADO' || v === 'EXERCIDA';
-              })
-            : [];
-
-          if (argMonth !== '' && tradeMonthKey) {
-            filtered = filtered.filter((obj) =>
-              (obj[tradeMonthKey] ?? '').toString().includes(argMonth),
-            );
-          }
-
-          if (argTicker !== '' && tickerKey) {
-            const t = argTicker.toUpperCase();
-            filtered = filtered.filter((obj) =>
-              (obj[tickerKey] ?? '').toString().trim().toUpperCase() === t,
-            );
-          }
-
-          result = JSON.stringify(filtered, null, 2);
-          break;
-        }
-
-        // ── COCKPIT POR ATIVO ────────────────────────────────────────────────
-        case 'get_cockpit_por_ativo': {
-          const argObj = args as Record<string, unknown>;
-          const ticker = typeof argObj['ticker'] === 'string' ? (argObj['ticker'] as string).trim() : '';
-          if (ticker === '') {
-            throw new Error('Parâmetro "ticker" é obrigatório.');
-          }
-
-          const rows = await readSheet('COCKPIT!A10:Z500');
-          if (rows.length < 2) {
-            result = JSON.stringify([]);
-            break;
-          }
-
-          const headers = rows[0] as string[];
-          const dataRows = rows.slice(1) as string[][];
-          const objects = rowsToObjects(headers, dataRows);
-
-          const tickerKey = headers.find((h) => h.toUpperCase() === 'TICKER');
-          if (!tickerKey) {
-            throw new Error('Coluna TICKER não encontrada na aba COCKPIT.');
-          }
-
-          const t = ticker.toUpperCase();
-          const filtered = objects.filter((obj) =>
-            (obj[tickerKey] ?? '').toString().trim().toUpperCase() === t,
-          );
-
-          result = JSON.stringify(filtered, null, 2);
-          break;
-        }
-
-        // ── RESUMO MENSAL ────────────────────────────────────────────────────
-        case 'get_resumo_mensal': {
-          const rows = await readSheet('COCKPIT!A10:Z500');
-
-          if (rows.length < 2) {
-            result = JSON.stringify([]);
-            break;
-          }
-
-          const headers = rows[0] as string[];
-          const dataRows = rows.slice(1) as string[][];
-          const objects = rowsToObjects(headers, dataRows);
-
-          const statusKey     = findStatusKey(headers);
-          const tradeMonthKey = headers.find((h) => h.toUpperCase().includes('TRADE_MONTH'));
-          const maxGainKey    = headers.find((h) => h.toUpperCase() === 'MAX_GAIN');
-          const plValueKey    = headers.find((h) => h.toUpperCase() === 'PL_VALUE');
-          const sideKey       = headers.find((h) => h.toUpperCase() === 'SIDE');
-
-          if (!statusKey || !tradeMonthKey || !maxGainKey || !plValueKey || !sideKey) {
-            throw new Error(
-              `Colunas obrigatórias ausentes na aba COCKPIT. Encontradas: ` +
-              `STATUS=${statusKey}, TRADE_MONTH=${tradeMonthKey}, ` +
-              `MAX_GAIN=${maxGainKey}, PL_VALUE=${plValueKey}, SIDE=${sideKey}.`,
-            );
-          }
-
-          interface Bucket {
-            trade_month: string;
-            max_gain_venda: number;
-            max_gain_compra: number;
-            pl_realizado: number;
-            qtde_encerradas: number;
-            qtde_ativas: number;
-          }
-          const buckets = new Map<string, Bucket>();
-          const getBucket = (month: string): Bucket => {
-            let b = buckets.get(month);
-            if (!b) {
-              b = {
-                trade_month: month,
-                max_gain_venda: 0,
-                max_gain_compra: 0,
-                pl_realizado: 0,
-                qtde_encerradas: 0,
-                qtde_ativas: 0,
-              };
-              buckets.set(month, b);
-            }
-            return b;
-          };
-
-          for (const obj of objects) {
-            const status = (obj[statusKey] ?? '').trim().toUpperCase();
-            const month  = (obj[tradeMonthKey] ?? '').trim();
-            if (month === '') continue;
-
-            if (status === 'ENCERRADO' || status === 'EXERCIDA') {
-              const side    = (obj[sideKey] ?? '').trim().toUpperCase();
-              const maxGain = parseNumberBR(obj[maxGainKey]);
-              const plValue = parseNumberBR(obj[plValueKey]);
-              const bucket  = getBucket(month);
-              if (side === 'VENDA')  bucket.max_gain_venda  += maxGain;
-              if (side === 'COMPRA') bucket.max_gain_compra += maxGain;
-              bucket.pl_realizado  += plValue;
-              bucket.qtde_encerradas += 1;
-            } else if (status === 'ATIVO') {
-              getBucket(month).qtde_ativas += 1;
-            }
-          }
-
-          const round2 = (n: number) => Math.round(n * 100) / 100;
-          const resumo = Array.from(buckets.values())
-            .sort((a, b) => a.trade_month.localeCompare(b.trade_month))
-            .map((b) => ({
-              trade_month: b.trade_month,
-              max_gain_venda:  round2(b.max_gain_venda),
-              max_gain_compra: round2(b.max_gain_compra),
-              premio_liquido:  round2(b.max_gain_venda + b.max_gain_compra),
-              pl_realizado:    round2(b.pl_realizado),
-              qtde_encerradas: b.qtde_encerradas,
-              qtde_ativas:     b.qtde_ativas,
-            }));
-
-          result = JSON.stringify(resumo, null, 2);
           break;
         }
 
@@ -518,210 +278,49 @@ function createMcpServer(): Server {
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
 
-// ---------------------------------------------------------------------------
-// Ciclo de vida das sessões SSE
-//
-// Arquitetura:
-//   • `activeTransports` — Map<sessionId, { server, transport }> com TODAS
-//     as conexões vivas. O `server` fica acoplado a uma única `transport`;
-//     ambos morrem juntos.
-//   • GET /sse — cria SSEServerTransport + Server NOVOS, registra no map,
-//     chama `server.connect(transport)`. Limpa em qualquer evento de término.
-//   • POST /messages — usa req.query.sessionId para achar o transport e
-//     repassa req/res para `transport.handlePostMessage()`.
-//
-// Por que isso evita "Already connected to a transport":
-//   O guard do SDK lança o erro quando `Protocol._transport` já está setado.
-//   Como `createMcpServer()` retorna uma instância NOVA a cada /sse, nenhuma
-//   instância de Server é reaproveitada — o guard nunca pode disparar.
-// ---------------------------------------------------------------------------
+const transports = new Map<string, SSEServerTransport>();
 
-interface SessionEntry {
-  server: Server;
-  transport: SSEServerTransport;
-}
-
-const activeTransports = new Map<string, SessionEntry>();
-
-async function closeSession(sessionId: string, reason: string): Promise<void> {
-  const entry = activeTransports.get(sessionId);
-  if (!entry) return;                             // já fechada — idempotente
-  activeTransports.delete(sessionId);             // remove ANTES de fechar para
-                                                  // bloquear reentradas de eventos
-  console.log(`[SSE] closing ${sessionId} (${reason}); active=${activeTransports.size}`);
-
-  try {
-    await entry.server.close();
-  } catch (err) {
-    console.warn(`[SSE] server.close() falhou (${sessionId}):`, err);
-  }
-  try {
-    await entry.transport.close();
-  } catch (err) {
-    console.warn(`[SSE] transport.close() falhou (${sessionId}):`, err);
-  }
-}
-
-// 1. GET /sse — abre canal SSE
+// GET /sse – open SSE channel
 app.get('/sse', async (req, res) => {
-  // Instâncias NOVAS por requisição. NÃO mover para o escopo do módulo —
-  // o Protocol do SDK lança "Already connected to a transport" se a mesma
-  // instância de Server receber .connect() duas vezes.
-  const sseTransport = new SSEServerTransport('/messages', res);
-  const mcpServer    = createMcpServer();
-  const sessionId    = sseTransport.sessionId;
+  const transport = new SSEServerTransport('/messages', res);
+  const server = createMcpServer();
 
-  activeTransports.set(sessionId, { server: mcpServer, transport: sseTransport });
+  transports.set(transport.sessionId, transport);
+  res.on('close', () => {
+    transports.delete(transport.sessionId);
+    console.log(`[SSE] session ${transport.sessionId} disconnected`);
+  });
 
-  // Limpa o map quando a conexão cair, evitando vazamento de memória.
-  req.on('close', () => { void closeSession(sessionId, 'req close'); });
-
-  try {
-    await mcpServer.connect(sseTransport);
-    console.log(`[SSE] session ${sessionId} connected; active=${activeTransports.size}`);
-  } catch (err) {
-    console.error(`[SSE] server.connect() falhou (${sessionId}):`, err);
-    await closeSession(sessionId, 'connect failed');
-    if (!res.headersSent) res.status(500).end();
-  }
+  console.log(`[SSE] session ${transport.sessionId} connected`);
+  await server.connect(transport);
 });
 
-// 2. POST /messages — stream bruto do MCP (sem body parser antes desta rota)
+// POST /messages – raw MCP stream (NO body parser before this route)
 app.post('/messages', async (req, res) => {
-  const sessionId = req.query['sessionId'];
-  if (!sessionId || typeof sessionId !== 'string') {
-    res.status(400).send('Session ID ausente ou inválido');
+  const sessionId = req.query['sessionId'] as string | undefined;
+
+  if (!sessionId) {
+    res.status(400).send('Missing sessionId query parameter.');
     return;
   }
 
-  const entry = activeTransports.get(sessionId);
-  if (!entry) {
-    res.status(404).send('Sessão SSE expirada ou não encontrada');
+  const transport = transports.get(sessionId);
+  if (!transport) {
+    res.status(404).send(`Session "${sessionId}" not found.`);
     return;
   }
 
-  try {
-    await entry.transport.handlePostMessage(req, res);
-  } catch (err) {
-    console.error(`[SSE] handlePostMessage falhou (${sessionId}):`, err);
-    if (!res.headersSent) res.status(500).end();
-    await closeSession(sessionId, 'handlePostMessage failed');
-  }
+  await transport.handlePostMessage(req, res);
 });
 
-// ---------------------------------------------------------------------------
-// Streamable HTTP transport (MCP spec 2025-03-26+)
-//
-// O Claude Web e clientes modernos usam exclusivamente o transporte
-// "Streamable HTTP": POST + DELETE no MESMO endpoint, com session id em
-// header `mcp-session-id`. O legacy SSE (GET /sse + POST /messages) acima
-// fica para retro-compat com curl/clientes antigos.
-//
-// O StreamableHTTPServerTransport precisa do body já parseado, por isso
-// usamos `express.json()` LOCAL na rota — não global. A regra crítica
-// continua valendo: nenhum body-parser pode rodar antes do POST /messages
-// legacy, que lê o stream bruto.
-// ---------------------------------------------------------------------------
-
-interface StreamableEntry {
-  server: Server;
-  transport: StreamableHTTPServerTransport;
-}
-const streamableSessions = new Map<string, StreamableEntry>();
-
-async function closeStreamableSession(sessionId: string, reason: string): Promise<void> {
-  const entry = streamableSessions.get(sessionId);
-  if (!entry) return;
-  streamableSessions.delete(sessionId);
-  console.log(`[StreamHTTP] closing ${sessionId} (${reason}); active=${streamableSessions.size}`);
-  try { await entry.server.close(); }    catch (err) { console.warn(`[StreamHTTP] server.close() falhou (${sessionId}):`, err); }
-  try { await entry.transport.close(); } catch (err) { console.warn(`[StreamHTTP] transport.close() falhou (${sessionId}):`, err); }
-}
-
-const streamableJsonParser = express.json();
-
-// 3. POST /sse — Streamable HTTP (initialize cria sessão; requisições
-//    subsequentes usam o header mcp-session-id).
-app.post('/sse', streamableJsonParser, async (req, res) => {
-  const headerSessionId = req.headers['mcp-session-id'];
-  const sessionId = typeof headerSessionId === 'string' ? headerSessionId : undefined;
-
-  let entry: StreamableEntry;
-
-  if (sessionId && streamableSessions.has(sessionId)) {
-    entry = streamableSessions.get(sessionId)!;
-  } else if (!sessionId && isInitializeRequest(req.body)) {
-    const mcpServer = createMcpServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      // Retorna application/json direto em vez de wrapper SSE.
-      // Mais compatível com clientes que tratam POST como request/response
-      // simples (Claude Web, MCP Inspector, etc.).
-      enableJsonResponse: true,
-      onsessioninitialized: (sid) => {
-        streamableSessions.set(sid, { server: mcpServer, transport });
-        console.log(`[StreamHTTP] session ${sid} initialized; active=${streamableSessions.size}`);
-      },
-    });
-
-    transport.onclose = () => {
-      const sid = transport.sessionId;
-      if (sid) void closeStreamableSession(sid, 'transport onclose');
-    };
-
-    try {
-      await mcpServer.connect(transport);
-    } catch (err) {
-      console.error(`[StreamHTTP] server.connect() falhou:`, err);
-      try { await mcpServer.close(); } catch { /* ignore */ }
-      if (!res.headersSent) res.status(500).end();
-      return;
-    }
-
-    entry = { server: mcpServer, transport };
-  } else {
-    res.status(400).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Bad Request: no valid session id and not an initialize request' },
-      id: null,
-    });
-    return;
-  }
-
-  try {
-    await entry.transport.handleRequest(req, res, req.body);
-  } catch (err) {
-    console.error(`[StreamHTTP] handleRequest falhou:`, err);
-    if (!res.headersSent) res.status(500).end();
-  }
-});
-
-// 4. DELETE /sse — encerra sessão Streamable HTTP.
-app.delete('/sse', async (req, res) => {
-  const headerSessionId = req.headers['mcp-session-id'];
-  const sessionId = typeof headerSessionId === 'string' ? headerSessionId : undefined;
-  if (!sessionId || !streamableSessions.has(sessionId)) {
-    res.status(404).send('Session not found');
-    return;
-  }
-  const entry = streamableSessions.get(sessionId)!;
-  try {
-    await entry.transport.handleRequest(req, res);
-  } catch (err) {
-    console.error(`[StreamHTTP] DELETE falhou (${sessionId}):`, err);
-    if (!res.headersSent) res.status(500).end();
-  }
-});
-
-// JSON parser só é seguro DEPOIS das rotas críticas acima
+// JSON parser is safe only AFTER the critical routes above
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     spreadsheetId: SPREADSHEET_ID || '(not set)',
-    legacySseSessions: activeTransports.size,
-    streamableHttpSessions: streamableSessions.size,
+    activeSessions: transports.size,
   });
 });
 
@@ -729,14 +328,10 @@ app.get('/health', (_req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 
-const BUILD_ID = process.env.BUILD_ID ?? 'dev';
-
 app.listen(PORT, () => {
   console.log(`\n🚀 Google Sheets MCP Server running on port ${PORT}`);
-  console.log(`   Build    → ${BUILD_ID} (per-request Server lifecycle)`);
-  console.log(`   Started  → ${new Date().toISOString()}`);
-  console.log(`   Streamable HTTP → POST/DELETE http://localhost:${PORT}/sse  (Claude Web)`);
-  console.log(`   Legacy SSE      → GET http://localhost:${PORT}/sse + POST /messages`);
-  console.log(`   Health          → http://localhost:${PORT}/health`);
-  console.log(`   Sheet           → ${SPREADSHEET_ID || '(SPREADSHEET_ID not set)'}\n`);
+  console.log(`   SSE      → http://localhost:${PORT}/sse`);
+  console.log(`   Messages → http://localhost:${PORT}/messages`);
+  console.log(`   Health   → http://localhost:${PORT}/health`);
+  console.log(`   Sheet    → ${SPREADSHEET_ID || '(SPREADSHEET_ID not set)'}\n`);
 });
