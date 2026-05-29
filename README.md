@@ -49,12 +49,16 @@ Claude Web / Claude Mobile
 
 ## Ferramentas Disponíveis
 
-| Ferramenta | Aba lida | Range | Lógica / parâmetros |
+13 ferramentas — 7 que devolvem linhas brutas das abas, 6 que calculam visões agregadas
+sobre a aba `COCKPIT`.
+
+### Leitura direta
+
+| Ferramenta | Aba | Range | Filtro / parâmetros |
 |---|---|---|---|
 | `get_cockpit_ativas` | `COCKPIT` | `A10:Z500` | STATUS / STATUS_OP / VENDA/COMPRA contém "ATIVO" ou QTDE não-vazia |
 | `get_cockpit_historico` | `COCKPIT` | `A10:Z500` | STATUS ∈ {ENCERRADO, EXERCIDA}. Filtros opcionais `trade_month` (substring) e `ticker` (match exato) |
-| `get_resumo_mensal` | `COCKPIT` | `A10:Z500` | Agrega por TRADE_MONTH: `max_gain_venda` + `max_gain_compra` + `premio_liquido` + `pl_realizado` (só encerradas) + `qtde_encerradas` + `qtde_ativas`. Ordenado por mês |
-| `get_cockpit_por_ativo` | `COCKPIT` | `A10:Z500` | Filtro obrigatório `ticker`. Devolve qualquer STATUS |
+| `get_cockpit_por_ativo` | `COCKPIT` | `A10:Z500` | `ticker` obrigatório. Devolve qualquer STATUS |
 | `get_screener_quantitativo` | `SCREENER_QUANTITATIVO` | `A1:Z200` | Todos os dados |
 | `get_scanner_opcoes` | `SCANNER_OPCOES` | `A1:Z500` | Todos os dados |
 | `get_maiores_lucros` | `SELECAO_OPCOES_MAIORES_LUCROS` | `A1:Z200` | Todos os dados |
@@ -62,8 +66,31 @@ Claude Web / Claude Mobile
 | `get_tendencia_m9m21` | `RANKING_TENDENCIA_M9M21` | `A1:Z300` | Todos os dados |
 | `get_correl_ibov` | `RANKING_CORREL_IBOV` | `A1:Z300` | Todos os dados |
 
-Todas as ferramentas têm `inputSchema` explícito mesmo quando não recebem argumentos
-(`{ type: 'object', properties: {} }`). Isso é obrigatório — ver Bug 3 abaixo.
+### Visões agregadas / cálculos
+
+| Ferramenta | Parâmetros | O que retorna |
+|---|---|---|
+| `get_resumo_mensal` | — | Por TRADE_MONTH: `max_gain_venda`, `max_gain_compra`, `premio_liquido`, `pl_realizado`, `qtde_encerradas`, `qtde_ativas`. **Semântica de prêmio: só encerradas/exercidas** (performance realizada) |
+| `get_resumo_por_ativo` | `ticker` obrigatório | Histórico consolidado: contagens por status, prêmio bruto/custo/líquido, P&L realizado e MTM, win rate, maior ganho/perda + `posicoes_ativas[]`. **Semântica de prêmio: TODAS** (exposição contratada) |
+| `get_dashboard_mensal` | `mes` obrigatório, `ano` opcional | Performance do mês + comparativo com mês anterior + quebra `por_ativo[]`. **Semântica de prêmio: TODAS** (exposição contratada). Win rate, maior ganho, melhor/pior operação só de realizadas |
+| `get_alertas_posicoes` | — | Avalia ATIVAS de VENDA contra regras de risco (DTE, MONEYNESS, PL_VALUE vs MAX_GAIN). Retorna `criticos`, `alertas`, `avisos` classificados, com ação sugerida por motivo. `DTE` calculado em tempo real (EXPIRY vs. hoje) |
+
+> ⚠️ **Duas semânticas de "prêmio líquido"** convivem propositalmente:
+> - `get_resumo_mensal` → **só realizado** ("o que já entrou e saiu de caixa por encerramento")
+> - `get_dashboard_mensal` e `get_resumo_por_ativo` → **toda exposição contratada** ("quanto vou ganhar/perder se nada mudar até o vencimento")
+>
+> A diferença explica por que maio/2026 mostra `-R$6.394` no resumo_mensal e `+R$630,41` no dashboard.
+
+### Convenções de input/output
+
+- Todas as ferramentas têm `inputSchema` explícito mesmo sem argumentos
+  (`{ type: 'object', properties: {} }`). Obrigatório — ver Bug 3.
+- Valores monetários (`MAX_GAIN`, `PL_VALUE`, `STRIKE`, `SPOT`) são parseados via
+  `parseNumberBR` que aceita BR (`1.234,56`), US (`1,234.56`), `R$`, `%` e negativos
+  em parênteses `(x)`. Detecção automática pela posição do separador mais à direita.
+- Datas (`EXPIRY`) aceitam `YYYY-MM-DD` ou `DD/MM/YYYY` no `get_alertas_posicoes`.
+- Match de `TRADE_MONTH` no `get_dashboard_mensal` é flexível — aceita `"5"`, `"05"`,
+  `"5/2026"`, `"05/2026"`, `"2026-05"`, `"2026-5"` e variações com `/`.
 
 ---
 
@@ -234,6 +261,37 @@ redeploys subsequentes** — só precisa fazer uma vez. Procedimento
 completo (incluindo extração de credenciais de uma imagem antiga e
 rotação) em `.claude/rules/infra.md` → "Credenciais do Google Sheets —
 Mount como arquivo".
+
+---
+
+### Bug 5 — Deploy fora de sincronia com o merge (pula um fix)
+
+**Sintoma:** Mergeou um PR no GitHub, deployou logo em seguida, mas a revisão
+no Cloud Run não tem o comportamento corrigido — o teste em produção mostra
+o bug que o PR resolvia.
+
+**Causa:** O `git pull origin main` foi executado **antes** do GitHub propagar
+o merge commit pro remote (timing apertado entre merge via UI e o pull no
+Cloud Shell). O `gcloud run deploy --source .` buildou a revisão a partir do
+commit anterior ao do PR. Aconteceu com a revisão 00018-98f, que foi buildada
+de `1d1dd09` (PR #15) quando o esperado era `636b039` (PR #16).
+
+**Como detectar:**
+```bash
+cd ~/google-sheets-mcp-deploy && git pull origin main
+git log --oneline -1                  # ← SHA do topo deve bater com o último PR mergeado
+COMMIT=$(git rev-parse --short HEAD)
+echo "Vai deployar: $COMMIT"          # ← imprima ANTES do deploy
+```
+
+A linha extra `git log --oneline -1 && echo "Vai deployar: $COMMIT"` evita o
+problema completamente — basta conferir o SHA antes de rodar o `deploy`.
+
+**Como recuperar:** redeploy normal a partir do main atualizado (gera nova
+revisão com o código correto), depois `update-traffic --to-latest`. Não
+precisa rebuildar imagem nem mexer em secrets.
+
+Procedimento completo de deploy seguro em `.claude/rules/infra.md`.
 
 ---
 
