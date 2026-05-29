@@ -70,16 +70,19 @@ sobre a aba `COCKPIT`.
 
 | Ferramenta | Parâmetros | O que retorna |
 |---|---|---|
-| `get_resumo_mensal` | — | Por TRADE_MONTH: `max_gain_venda`, `max_gain_compra`, `premio_liquido`, `pl_realizado`, `qtde_encerradas`, `qtde_ativas`. **Semântica de prêmio: só encerradas/exercidas** (performance realizada) |
-| `get_resumo_por_ativo` | `ticker` obrigatório | Histórico consolidado: contagens por status, prêmio bruto/custo/líquido, P&L realizado e MTM, win rate, maior ganho/perda + `posicoes_ativas[]`. **Semântica de prêmio: TODAS** (exposição contratada) |
-| `get_dashboard_mensal` | `mes` obrigatório, `ano` opcional | Performance do mês + comparativo com mês anterior + quebra `por_ativo[]`. **Semântica de prêmio: TODAS** (exposição contratada). Win rate, maior ganho, melhor/pior operação só de realizadas |
+| `get_resumo_mensal` | — | Por TRADE_MONTH: `max_gain_venda`, `max_gain_compra`, `premio_liquido`, `pl_realizado`, `qtde_encerradas`, `qtde_ativas` |
+| `get_resumo_por_ativo` | `ticker` obrigatório | Histórico consolidado: contagens por status, prêmio bruto/custo/líquido, P&L realizado e MTM, win rate, maior ganho/perda + `posicoes_ativas[]` |
+| `get_dashboard_mensal` | `mes` obrigatório, `ano` opcional | Performance do mês + comparativo com mês anterior + quebra `por_ativo[]`. Win rate, maior ganho, melhor/pior operação só de realizadas |
 | `get_alertas_posicoes` | — | Avalia ATIVAS de VENDA contra regras de risco (DTE, MONEYNESS, PL_VALUE vs MAX_GAIN). Retorna `criticos`, `alertas`, `avisos` classificados, com ação sugerida por motivo. `DTE` calculado em tempo real (EXPIRY vs. hoje) |
 
-> ⚠️ **Duas semânticas de "prêmio líquido"** convivem propositalmente:
-> - `get_resumo_mensal` → **só realizado** ("o que já entrou e saiu de caixa por encerramento")
-> - `get_dashboard_mensal` e `get_resumo_por_ativo` → **toda exposição contratada** ("quanto vou ganhar/perder se nada mudar até o vencimento")
->
-> A diferença explica por que maio/2026 mostra `-R$6.394` no resumo_mensal e `+R$630,41` no dashboard.
+### Semântica unificada de prêmio
+
+As três ferramentas que computam prêmio (`get_resumo_mensal`, `get_dashboard_mensal`, `get_resumo_por_ativo`) usam a **mesma definição**:
+
+- **`premio_bruto_vendas`**, **`custo_protecoes`** e **`premio_liquido`** somam o `MAX_GAIN` de **TODAS** as operações do escopo (ativas + encerradas + exercidas). Reflete a exposição contratada — quanto se pode ganhar/perder se nada mudar até o vencimento.
+- **`pl_realizado`** soma apenas o `PL_VALUE` das encerradas/exercidas — performance que já entrou em caixa.
+- **`qtde_encerradas`** e **`qtde_ativas`** ficam separados como contadores explícitos.
+- **`win_rate`**, **`maior_ganho`**, **`maior_perda`**, **`melhor_operacao`**, **`pior_operacao`** consideram apenas as encerradas/exercidas (estatísticas de performance realizada).
 
 ### Convenções de input/output
 

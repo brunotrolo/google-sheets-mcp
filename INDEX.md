@@ -68,8 +68,8 @@ Requisição do Claude
 | Convenção | Aplicada em | Por quê |
 |---|---|---|
 | `inputSchema` sempre presente | Todas as 13 tools | Conector Claude Web rejeita lista se alguma tool sem inputSchema (Bug 3) |
-| Prêmio "só realizado" | `get_resumo_mensal` | Visão de performance que já entrou em caixa |
-| Prêmio "toda exposição" | `get_dashboard_mensal`, `get_resumo_por_ativo` | Visão de exposição contratada (inclui ATIVO) |
+| Prêmio = TODAS as operações (ativas + encerradas + exercidas) | `get_resumo_mensal`, `get_dashboard_mensal`, `get_resumo_por_ativo` | Semântica unificada — exposição contratada no escopo |
+| `pl_realizado` só de encerradas/exercidas | mesmas três | P&L que já entrou em caixa, separado da exposição |
 | Match flexível de `TRADE_MONTH` | `get_dashboard_mensal` | Aceita `"5"`, `"05"`, `"05/2026"`, `"2026-05"` etc. |
 | Regras de alerta só pra SIDE=VENDA | `get_alertas_posicoes` | Risco de short de opções; COMPRAs entram em `saudaveis` |
 

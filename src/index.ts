@@ -104,7 +104,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_resumo_mensal',
-        description: 'Resumo agregado por TRADE_MONTH da aba COCKPIT. Para cada mês: soma de MAX_GAIN das vendas (prêmio bruto), soma de MAX_GAIN das compras (custo de proteções), prêmio líquido, P&L realizado (soma de PL_VALUE), quantidade de encerradas/exercidas e quantidade de ativas. Ordenado cronologicamente.',
+        description: 'Resumo agregado por TRADE_MONTH da aba COCKPIT. Prêmios (max_gain_venda, max_gain_compra, premio_liquido) somam TODAS as operações do mês (ativas + encerradas + exercidas) — refletem a exposição contratada. P&L realizado e contagens consideram apenas as encerradas/exercidas (qtde_encerradas) e ativas (qtde_ativas) separadamente. Ordenado cronologicamente.',
         inputSchema: { type: 'object', properties: {} }
       },
       {
@@ -260,17 +260,25 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         const month = String(item['TRADE_MONTH'] || '').trim();
         if (month === '') continue;
         const status = String(statusHeader ? item[statusHeader] : '').trim().toUpperCase();
+        // Só linhas com status reconhecido entram nos agregados
+        if (status !== 'ENCERRADO' && status !== 'EXERCIDA' && status !== 'ATIVO') continue;
+
+        const side = String(item['SIDE'] || '').trim().toUpperCase();
+        const mg = parseNumberBR(item['MAX_GAIN']);
+        const b = getBucket(month);
+
+        // Prêmios somam TODAS as operações do mês (ativas + encerradas + exercidas) —
+        // reflete a exposição total contratada no período. Mesma semântica do
+        // get_dashboard_mensal e get_resumo_por_ativo.
+        if (side === 'VENDA')  b.max_gain_venda  += mg;
+        if (side === 'COMPRA') b.max_gain_compra += mg;
+
+        // P&L realizado e count de encerradas: apenas encerradas/exercidas
         if (status === 'ENCERRADO' || status === 'EXERCIDA') {
-          const side = String(item['SIDE'] || '').trim().toUpperCase();
-          const mg = parseNumberBR(item['MAX_GAIN']);
-          const pl = parseNumberBR(item['PL_VALUE']);
-          const b = getBucket(month);
-          if (side === 'VENDA') b.max_gain_venda += mg;
-          if (side === 'COMPRA') b.max_gain_compra += mg;
-          b.pl_realizado += pl;
+          b.pl_realizado += parseNumberBR(item['PL_VALUE']);
           b.qtde_encerradas += 1;
         } else if (status === 'ATIVO') {
-          getBucket(month).qtde_ativas += 1;
+          b.qtde_ativas += 1;
         }
       }
       const round2 = (n: number) => Math.round(n * 100) / 100;
