@@ -206,11 +206,32 @@ Migra tráfego de volta:
 
 ```bash
 gcloud run services update-traffic oplab-sheets-mcp --region=us-east1 \
-  --to-revisions=oplab-sheets-mcp-00015-glk=100
+  --to-revisions=oplab-sheets-mcp-00020-2rt=100
 ```
 
-A imagem `working-baseline-v2` no Artifact Registry é a referência
-estável (PR #12 / revisão 00015).
+A tag `working-baseline-v6` no Artifact Registry é a referência estável atual
+(PR #17 / revisão 00020 — 13 ferramentas todas funcionando). Tags anteriores
+ficam preservadas: `v5` (00019), `v4` (00018), `v3` (00017), `v2` (00015).
+
+### 6. Antes de `gcloud run deploy`, conferir o SHA local
+
+Aconteceu na revisão 00018-98f: o PR #16 foi mergeado, e o deploy rodou
+**antes** do GitHub propagar o merge commit. O `git pull` puxou o estado
+anterior ao PR, e a revisão saiu sem o fix. Sintoma: o bug que o PR resolvia
+voltou a aparecer no teste pós-deploy.
+
+Sempre incluir no fluxo:
+
+```bash
+cd ~/google-sheets-mcp-deploy && git pull origin main
+git log --oneline -1                  # ← confere se o último PR está no topo
+COMMIT=$(git rev-parse --short HEAD)
+echo "Vai deployar: $COMMIT"
+```
+
+Se o SHA não bater com o último PR mergeado, espera 30 segundos e roda
+`git pull` de novo antes de chamar `gcloud run deploy`. Detalhes em
+`README.md` → Bug 5.
 
 ---
 

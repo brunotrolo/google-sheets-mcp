@@ -57,11 +57,21 @@ Requisição do Claude
 
 | Função / Handler | O que faz |
 |---|---|
-| `parseNumberBR(raw)` | Converte string em número aceitando formato BR (`1.234,56`), US (`1234.56`), `R$`, `%`, `(x)` negativo |
-| `ListToolsRequestSchema` handler | Array inline com as 10 ferramentas, todas com `inputSchema` explícito |
+| `parseNumberBR(raw)` | Converte string em número. Detecta BR (`1.234,56`) vs US (`1,234.56`) pela posição do separador mais à direita (decimal). Tolera `R$`, `%`, espaços e `(x)` negativo |
+| `ListToolsRequestSchema` handler | Array inline com as **13 ferramentas**, todas com `inputSchema` explícito |
 | `CallToolRequestSchema` handler | `if/else` por nome → resolve `range`, fetch da aba, monta `data` (array de objetos), aplica transformação/filtro por ferramenta, retorna como `text/JSON` |
 | `app.get('/sse', ...)` | Fecha `mcpServer` se já houver transport ativo, cria `SSEServerTransport` novo, `mcpServer.connect(transport)` |
 | `app.post('/messages', ...)` | Roteia stream bruto para `transport.handlePostMessage(req, res)` |
+
+## Convenções semânticas (cuidado ao mexer)
+
+| Convenção | Aplicada em | Por quê |
+|---|---|---|
+| `inputSchema` sempre presente | Todas as 13 tools | Conector Claude Web rejeita lista se alguma tool sem inputSchema (Bug 3) |
+| Prêmio "só realizado" | `get_resumo_mensal` | Visão de performance que já entrou em caixa |
+| Prêmio "toda exposição" | `get_dashboard_mensal`, `get_resumo_por_ativo` | Visão de exposição contratada (inclui ATIVO) |
+| Match flexível de `TRADE_MONTH` | `get_dashboard_mensal` | Aceita `"5"`, `"05"`, `"05/2026"`, `"2026-05"` etc. |
+| Regras de alerta só pra SIDE=VENDA | `get_alertas_posicoes` | Risco de short de opções; COMPRAs entram em `saudaveis` |
 
 ## Dependências Externas
 
