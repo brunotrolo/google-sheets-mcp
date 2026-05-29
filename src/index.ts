@@ -131,7 +131,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_dashboard_mensal',
-        description: 'Dashboard de performance para um mês específico da aba COCKPIT. Calcula prêmio bruto/líquido, P&L realizado, contagens, win rate, melhor/pior operação (OPTION_TICKER), comparativo com o mês anterior (variação % do prêmio líquido), e quebra por ticker dentro do mês.',
+        description: 'Dashboard de performance para um mês específico da aba COCKPIT. Prêmios (premio_bruto_vendas, custo_protecoes, premio_liquido) somam TODAS as operações do mês (ativas + encerradas + exercidas) — refletem a exposição contratada. P&L realizado, win rate, melhor/pior operação consideram apenas as encerradas/exercidas (performance realizada). Inclui também comparativo com mês anterior (variação % do prêmio líquido total) e quebra por ticker.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -402,17 +402,28 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!isCur && !isAnt) continue;
 
         const status = statusOf(item);
+        // Só considera linhas com status reconhecido para evitar lixo
+        if (status !== 'ENCERRADO' && status !== 'EXERCIDA' && status !== 'ATIVO') {
+          if (isCur) linhasMes.push(item);
+          continue;
+        }
+
+        const side = sideOf(item);
+        const mg = parseNumberBR(item['MAX_GAIN']);
         const targets: Bucket[] = [];
         if (isCur) targets.push(cur);
         if (isAnt) targets.push(ant);
 
+        // Prêmios somam TODAS as operações do mês (ativas + encerradas + exercidas) —
+        // refletem a exposição total já contratada no período.
+        for (const b of targets) {
+          if (side === 'VENDA') b.max_gain_venda += mg;
+          if (side === 'COMPRA') b.max_gain_compra += mg;
+        }
+
         if (status === 'ENCERRADO' || status === 'EXERCIDA') {
-          const side = sideOf(item);
-          const mg = parseNumberBR(item['MAX_GAIN']);
           const pl = parseNumberBR(item['PL_VALUE']);
           for (const b of targets) {
-            if (side === 'VENDA') b.max_gain_venda += mg;
-            if (side === 'COMPRA') b.max_gain_compra += mg;
             b.pl_realizado += pl;
             b.qtde_encerradas += 1;
           }
@@ -468,18 +479,24 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const item of linhasMes) {
         const t = String(item['TICKER'] || '').trim().toUpperCase();
         if (t === '') continue;
+        const s = statusOf(item);
+        if (s !== 'ENCERRADO' && s !== 'EXERCIDA' && s !== 'ATIVO') continue;
+
         let pa = porAtivoMap.get(t);
         if (!pa) {
           pa = { ticker: t, operacoes: 0, max_gain_venda: 0, max_gain_compra: 0, pl_realizado: 0 };
           porAtivoMap.set(t, pa);
         }
         pa.operacoes += 1;
-        const s = statusOf(item);
+
+        // Prêmios somam TODAS as posições do mês (mesma semântica do total acima)
+        const side = sideOf(item);
+        const mg = parseNumberBR(item['MAX_GAIN']);
+        if (side === 'VENDA')  pa.max_gain_venda  += mg;
+        if (side === 'COMPRA') pa.max_gain_compra += mg;
+
+        // P&L realizado segue só nas realizadas
         if (s === 'ENCERRADO' || s === 'EXERCIDA') {
-          const side = sideOf(item);
-          const mg = parseNumberBR(item['MAX_GAIN']);
-          if (side === 'VENDA')  pa.max_gain_venda  += mg;
-          if (side === 'COMPRA') pa.max_gain_compra += mg;
           pa.pl_realizado += parseNumberBR(item['PL_VALUE']);
         }
       }
