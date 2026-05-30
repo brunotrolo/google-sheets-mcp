@@ -58,8 +58,8 @@ Requisição do Claude
 | Função / Handler | O que faz |
 |---|---|
 | `parseNumberBR(raw)` | Converte string em número. Detecta BR (`1.234,56`) vs US (`1,234.56`) pela posição do separador mais à direita (decimal). Tolera `R$`, `%`, espaços e `(x)` negativo |
-| `ListToolsRequestSchema` handler | Array inline com as **13 ferramentas**, todas com `inputSchema` explícito |
-| `CallToolRequestSchema` handler | `if/else` por nome → resolve `range`, fetch da aba, monta `data` (array de objetos), aplica transformação/filtro por ferramenta, retorna como `text/JSON` |
+| `ListToolsRequestSchema` handler | Array inline com as **14 ferramentas** (13 de leitura de Sheets + `acionar_automacao_planilha`), todas com `inputSchema` explícito |
+| `CallToolRequestSchema` handler | `if/else` por nome. `acionar_automacao_planilha` é tratada antes do bloco de Sheets — faz `fetch` POST para `APPS_SCRIPT_WEB_APP_URL`. As demais resolvem `range`, fetch da aba, montam `data` e aplicam transformação/filtro |
 | `app.get('/sse', ...)` | Fecha `mcpServer` se já houver transport ativo, cria `SSEServerTransport` novo, `mcpServer.connect(transport)` |
 | `app.post('/messages', ...)` | Roteia stream bruto para `transport.handlePostMessage(req, res)` |
 
@@ -67,7 +67,8 @@ Requisição do Claude
 
 | Convenção | Aplicada em | Por quê |
 |---|---|---|
-| `inputSchema` sempre presente | Todas as 13 tools | Conector Claude Web rejeita lista se alguma tool sem inputSchema (Bug 3) |
+| `inputSchema` sempre presente | Todas as 14 tools | Conector Claude Web rejeita lista se alguma tool sem inputSchema (Bug 3) |
+| `acionar_automacao_planilha` NÃO usa Sheets API | Única write-tool | Dispara automação via Apps Script Web App; lida com `APPS_SCRIPT_WEB_APP_URL` + `APPS_SCRIPT_TOKEN` (Secret Manager) |
 | Prêmio = TODAS as operações (ativas + encerradas + exercidas) | `get_resumo_mensal`, `get_dashboard_mensal`, `get_resumo_por_ativo` | Semântica unificada — exposição contratada no escopo |
 | `pl_realizado` só de encerradas/exercidas | mesmas três | P&L que já entrou em caixa, separado da exposição |
 | Match flexível de `TRADE_MONTH` | `get_dashboard_mensal` | Aceita `"5"`, `"05"`, `"05/2026"`, `"2026-05"` etc. |
