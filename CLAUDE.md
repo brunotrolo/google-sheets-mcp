@@ -80,6 +80,13 @@ A ordem no `src/index.ts` deve ser sempre:
 
 Detalhes em `.claude/rules/express-stream.md`.
 
+> Atalho recorrente: ferramentas novas (incluindo as que disparam HTTP
+> outbound, como `acionar_automacao_planilha`) **não** precisam de
+> `express.json()`. Argumentos chegam via `request.params.arguments`
+> dentro do `CallToolRequestSchema`, já parseados pelo MCP SDK a partir
+> do stream SSE. Adicionar `express.json()` global quebra esse stream
+> silenciosamente.
+
 ---
 
 ## Como Adicionar uma Nova Ferramenta

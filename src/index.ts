@@ -175,6 +175,35 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
         name: 'get_correl_ibov',
         description: 'Retorna dados da aba RANKING_CORREL_IBOV.',
         inputSchema: { type: 'object', properties: {} }
+      },
+      {
+        name: 'acionar_automacao_planilha',
+        description: 'Dispara uma automação no Google Apps Script da planilha OPLab (atualização de dados, scanner, gregas etc). O servidor faz POST para o Web App configurado em APPS_SCRIPT_WEB_APP_URL com o token compartilhado e o nome da função. Retorna a resposta do Apps Script.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            nome_da_funcao: {
+              type: 'string',
+              description: 'Nome exato da função do Apps Script a executar.',
+              enum: [
+                'executarFluxoSequencial',
+                'executarSequenciaScanner',
+                'AtualizarNecton_Menu',
+                'AtualizarDadosAtivos_Menu',
+                'AtualizarDetalhes_Menu',
+                'AtualizarGregasAPI_Menu',
+                'CalcularGregasNativo_Menu',
+                'AtualizarScannerOpcoes_Menu',
+                'SyncBestCoveredOptionsRates_Menu',
+                'SyncHighestOptionsVolume_Menu',
+                'SyncM9M21Ranking_Menu',
+                'SyncCorrelIbovRanking_Menu',
+                'ScreenerQuantitativo_Menu'
+              ]
+            }
+          },
+          required: ['nome_da_funcao']
+        }
       }
     ]
   };
@@ -182,6 +211,51 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
 
 mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
+
+  if (name === 'acionar_automacao_planilha') {
+    try {
+      const a = args as any;
+      const funcao = typeof a.nome_da_funcao === 'string' ? a.nome_da_funcao.trim() : '';
+      if (funcao === '') throw new Error('Parâmetro "nome_da_funcao" é obrigatório.');
+
+      const url = process.env.APPS_SCRIPT_WEB_APP_URL;
+      const token = process.env.APPS_SCRIPT_TOKEN;
+      if (!url)   throw new Error('Variável APPS_SCRIPT_WEB_APP_URL não configurada.');
+      if (!token) throw new Error('Variável APPS_SCRIPT_TOKEN não configurada.');
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, funcao }),
+        redirect: 'follow',
+      });
+      const bodyText = await resp.text();
+      let parsed: any = null;
+      try { parsed = JSON.parse(bodyText); } catch { /* texto puro */ }
+
+      if (!resp.ok) {
+        return {
+          content: [{ type: 'text', text: `Apps Script retornou HTTP ${resp.status}: ${bodyText}` }],
+          isError: true,
+        };
+      }
+      if (parsed && parsed.status === 'Erro') {
+        return {
+          content: [{ type: 'text', text: `Apps Script reportou erro: ${parsed.message || bodyText}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text', text: JSON.stringify(parsed ?? { raw: bodyText }, null, 2) }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: 'text', text: `Erro ao acionar automação: ${error.message}` }],
+        isError: true,
+      };
+    }
+  }
+
   if (!SPREADSHEET_ID) throw new Error('Variável SPREADSHEET_ID não configurada.');
 
   try {
