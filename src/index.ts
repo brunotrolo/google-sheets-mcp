@@ -1,7 +1,7 @@
 import express from 'express';
 import { google } from 'googleapis';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -24,26 +24,26 @@ const mcpServer = new Server(
   { capabilities: { tools: {} } }
 );
 
-let transport: SSEServerTransport | null = null;
-
-app.get('/sse', async (req, res) => {
-  if (transport) {
-    try {
-      await mcpServer.close();
-    } catch (e) {
-      console.error('Ignorando erro ao fechar transport antigo:', e);
+// Streamable HTTP stateless: cada chamada responde e FECHA — sem conexão
+// pendurada, então a CPU só é cobrada durante o processamento da requisição.
+let connected = false;
+app.post('/mcp', express.json(), async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  res.on('close', () => {
+    transport.close();
+  });
+  try {
+    if (connected) {
+      try { await mcpServer.close(); } catch { /* ignore */ }
     }
-  }
-
-  transport = new SSEServerTransport('/messages', res);
-  await mcpServer.connect(transport);
-});
-
-app.post('/messages', async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send('SSE transport não inicializado');
+    await mcpServer.connect(transport);
+    connected = true;
+    await transport.handleRequest(req, res, req.body);
+  } catch (e) {
+    console.error('Erro MCP:', e);
+    if (!res.headersSent) {
+      res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
+    }
   }
 });
 
