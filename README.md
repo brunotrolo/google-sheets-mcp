@@ -427,3 +427,13 @@ de `tools/list` mostrado acima.
 | `SPREADSHEET_ID` | Sim | ID da planilha (URL: `/spreadsheets/d/<ID>/edit`) |
 | `PORT` | Não (padrão: 8080) | Porta do servidor HTTP |
 | `BUILD_ID` | Não | Identificador de build (commit SHA), útil em logs |
+
+
+---
+
+## 💰 Gestão de custos (LEIA ANTES DE FAZER DEPLOY)
+
+Este MCP roda no Google Cloud Run. Para não gerar custo elevado, siga a arquitetura
+de referência em [**COST_MANAGEMENT.md**](COST_MANAGEMENT.md): transporte **Streamable
+HTTP stateless** (nunca SSE), `--cpu-throttling`, `--min-instances=0`, `--timeout=120`.
+Regra de ouro: **conexão não pode ficar pendurada** — é o que faz a CPU ser cobrada 24/7.
