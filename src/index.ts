@@ -19,25 +19,23 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-const mcpServer = new Server(
-  { name: 'oplab-sheets-portfolio', version: '1.0.0' },
-  { capabilities: { tools: {} } }
-);
+// Cria um servidor NOVO por requisição (igual ao OpLab) — robusto sob concorrência.
+function buildServer(): Server {
+  const srv = new Server(
+    { name: 'gs-controle-opcoes', version: '1.0.0' },
+    { capabilities: { tools: {} } }
+  );
+  register(srv);
+  return srv;
+}
 
-// Streamable HTTP stateless: cada chamada responde e FECHA — sem conexão
-// pendurada, então a CPU só é cobrada durante o processamento da requisição.
-let connected = false;
+// Streamable HTTP stateless: cada chamada cria server+transport próprios e FECHA.
 app.post('/mcp', express.json(), async (req, res) => {
+  const server = buildServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  res.on('close', () => {
-    transport.close();
-  });
+  res.on('close', () => { transport.close(); server.close(); });
   try {
-    if (connected) {
-      try { await mcpServer.close(); } catch { /* ignore */ }
-    }
-    await mcpServer.connect(transport);
-    connected = true;
+    await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (e) {
     console.error('Erro MCP:', e);
@@ -83,7 +81,8 @@ function parseNumberBR(raw: any): number {
   return negative ? -n : n;
 }
 
-mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
+function register(srv: Server) {
+  srv.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
@@ -209,7 +208,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
-mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+  srv.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
 
   if (name === 'acionar_automacao_planilha') {
@@ -731,7 +730,8 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (error: any) {
     return { content: [{ type: 'text', text: `Erro: ${error.message}` }], isError: true };
   }
-});
+  });
+}
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'oplab-sheets-mcp', tools: 14 }));
 
