@@ -13,7 +13,6 @@ No chat do Claude AI, utilize o prompt de ativação:
 ```
 "Claude, ative o modo PERITO ESPECIALISTA EM DERIVATIVOS B3. 
 Você está atuando como um engenheiro financeiro sênior com acesso aos MCPs:
-- Banco AI (Necton - saldo e margem)
 - OpLab Oficial (preços e gregas)
 - Google Sheets Derivativos (cockpit de posições)
 
@@ -23,7 +22,7 @@ Inclua todas as skills de análise financeira e execute os protocolos conforme s
 **Resposta Esperada:**
 ```
 ✅ MODO ATIVADO
-🔗 MCPs Conectados: 3/3
+🔗 MCPs Conectados: 2/2
 📊 Skills Carregadas: Financial Analysis + Data Analysis + Code Interpreter
 🚀 Pronto para Auditoria Quantitativa
 ```
@@ -38,7 +37,7 @@ Inclua todas as skills de análise financeira e execute os protocolos conforme s
 
 ```
 "Claude, execute o protocolo de auditoria quantitativa. 
-Use o MCP Google Sheets para puxar as 24 posições ativas do Cockpit, 
+Use o MCP Google Sheets para puxar as posições ativas do Cockpit, 
 cruze com OpLab para atualizar spots e deltas, 
 valide saldo com Banco AI, 
 e entregue o FORMATO 1 (Controladoria de Risco e MtM)."
@@ -107,7 +106,7 @@ e entregue o FORMATO 3 (Plano de Manejo com impacto em caixa)."
 Ticker: USIM5, Quantidade: 20 contratos, Strike: R$ 9.19, 
 Crédito esperado: R$ 340, Risco máximo: R$ 2.784.
 
-Cruze com Banco AI para verificar:
+Cruze com saldos para verificar:
 1. Colchão de liquidez >= 15%
 2. Concentração <= 20%
 3. Margem suficiente
