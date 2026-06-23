@@ -733,4 +733,6 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'oplab-sheets-mcp', tools: 14 }));
+
 app.listen(PORT, () => console.log(`[Sheets-MCP] Ativado na porta ${PORT}`));
