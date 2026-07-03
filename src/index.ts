@@ -1,5 +1,4 @@
 import express from 'express';
-import { google } from 'googleapis';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -12,12 +11,28 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
-const auth = new google.auth.GoogleAuth({
-  keyFile: path.join(process.cwd(), 'config', 'credentials.json'),
-  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-});
-
-const sheets = google.sheets({ version: 'v4', auth });
+// ── Cliente do Sheets LAZY (anti cold-start / anti-flap) ────────────────────────
+// A biblioteca `googleapis` é pesada e o `GoogleAuth` lê a credencial do disco.
+// Fazer isso no topo do módulo atrasa o BOOT do container — e com min-instances=0
+// o handshake MCP (initialize/tools/list) do claude.ai chega no container ainda
+// frio e estoura o timeout do conector ("tool not found"). Carregando o googleapis
+// só na PRIMEIRA chamada de ferramenta, o boot vira só o Express (quase instantâneo)
+// e o handshake responde na hora, igual ao OpLab. O cliente é cacheado no escopo do
+// módulo, então o token OAuth do Google é reaproveitado entre requisições.
+let sheetsClientPromise: Promise<any> | null = null;
+function getSheets(): Promise<any> {
+  if (!sheetsClientPromise) {
+    sheetsClientPromise = (async () => {
+      const { google } = await import('googleapis');
+      const auth = new google.auth.GoogleAuth({
+        keyFile: path.join(process.cwd(), 'config', 'credentials.json'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+      });
+      return google.sheets({ version: 'v4', auth });
+    })();
+  }
+  return sheetsClientPromise;
+}
 
 // Cria um servidor NOVO por requisição (igual ao OpLab) — robusto sob concorrência.
 function buildServer(): Server {
@@ -274,12 +289,13 @@ function register(srv: Server) {
     else if (name === 'get_correl_ibov') range = 'RANKING_CORREL_IBOV!A1:Z300';
     else throw new Error(`Ferramenta desconhecida: ${name}`);
 
+    const sheets = await getSheets();
     const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range });
-    const rows = response.data.values || [];
+    const rows: any[][] = response.data.values || [];
     if (rows.length === 0) return { content: [{ type: 'text', text: 'Nenhum dado encontrado.' }] };
 
     const headers = rows[0];
-    let data = rows.slice(1).map(row => {
+    let data = rows.slice(1).map((row: any[]) => {
       const obj: any = {};
       headers.forEach((header: string, i: number) => { obj[header] = row[i] || ''; });
       return obj;
