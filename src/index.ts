@@ -114,6 +114,195 @@ function parseNumberBR(raw: any): number {
   return negative ? -n : n;
 }
 
+// ── Ferramenta 1: get_status_operacoes ─────────────────────────────────────────
+// QUANTITY vem como "1,000" / "3,200" (vírgula = MILHAR, formato US), NÃO decimal.
+// parseNumberBR interpretaria "1,000" como 1.0 → ERRADO. Aqui removemos tudo que
+// não é dígito e pegamos só a parte inteira.
+function parseQtd(raw: any): number {
+  const s = String(raw ?? '').split('.')[0].replace(/[^0-9]/g, '');
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) ? Math.abs(n) : 0;
+}
+
+// DTE a partir de EXPIRY "DD/MM/YYYY" (ou "YYYY-MM-DD").
+function dteFromExpiry(raw: any): number | null {
+  const s = String(raw ?? '').trim();
+  let d: Date | null = null;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  else { m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if (m) d = new Date(Date.UTC(+m[3], +m[2] - 1, +m[1])); }
+  if (!d || isNaN(d.getTime())) return null;
+  const hoje = new Date();
+  const hojeUTC = Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth(), hoje.getUTCDate());
+  return Math.round((d.getTime() - hojeUTC) / 86400000);
+}
+
+interface StatusLeg { ticker: string; option_ticker: string; side: string; type: string; quantity: number; strike: number; spot: number; last: number; entry: number; pl_value: number; expiry: string; }
+
+export function buildStatusOperacoes(rows: any[], args: { incluir_encerradas?: boolean; patrimonio?: number; limite_concentracao_pct?: number }) {
+  const incluirEnc = args?.incluir_encerradas === true;
+  const patrimonio = Number.isFinite(Number(args?.patrimonio)) && Number(args?.patrimonio) > 0 ? Number(args.patrimonio) : 120000;
+  const limitePct = Number.isFinite(Number(args?.limite_concentracao_pct)) ? Number(args.limite_concentracao_pct) : 25;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+
+  // 1) filtra por status e mapeia pernas
+  const legs: StatusLeg[] = rows.filter((it) => {
+    const status = String(it['STATUS'] ?? it['STATUS_OP'] ?? '').toUpperCase();
+    if (incluirEnc) return true;
+    return status.includes('ATIVO');
+  }).map((it): StatusLeg => ({
+    ticker: String(it['TICKER'] ?? '').trim().toUpperCase(),
+    option_ticker: String(it['OPTION_TICKER'] ?? '').trim().toUpperCase(),
+    side: String(it['SIDE'] ?? '').trim().toUpperCase(),
+    type: String(it['OPTION_TYPE'] ?? '').trim().toUpperCase(),
+    quantity: parseQtd(it['QUANTITY']),
+    strike: parseNumberBR(it['STRIKE']),
+    spot: parseNumberBR(it['SPOT']),
+    last: parseNumberBR(it['LAST_PREMIUM']),
+    entry: parseNumberBR(it['ENTRY_PRICE']),
+    pl_value: parseNumberBR(it['PL_VALUE']),
+    expiry: String(it['EXPIRY'] ?? '').trim(),
+  })).filter((l) => l.ticker && l.option_ticker && l.quantity > 0);
+
+  // 2) agrupa por (TICKER, EXPIRY)
+  const grupos = new Map<string, StatusLeg[]>();
+  for (const l of legs) { const k = `${l.ticker}|${l.expiry}`; const a = grupos.get(k) ?? []; a.push(l); grupos.set(k, a); }
+
+  const estruturas: any[] = [];
+  for (const [, gl] of grupos) {
+    const vp = gl.filter((l) => l.side === 'VENDA' && l.type === 'PUT');
+    const cp = gl.filter((l) => l.side === 'COMPRA' && l.type === 'PUT');
+    const vc = gl.filter((l) => l.side === 'VENDA' && l.type === 'CALL');
+    const cc = gl.filter((l) => l.side === 'COMPRA' && l.type === 'CALL');
+    const hasVP = vp.length > 0, hasCP = cp.length > 0, hasVC = vc.length > 0, hasCC = cc.length > 0;
+    const qSoldP = vp.reduce((s, l) => s + l.quantity, 0), qBoughtP = cp.reduce((s, l) => s + l.quantity, 0);
+    const qSoldC = vc.reduce((s, l) => s + l.quantity, 0), qBoughtC = cc.reduce((s, l) => s + l.quantity, 0);
+    // Há venda a descoberto (líquida) quando o vendido excede a proteção do MESMO tipo.
+    const descobertoLiquido = qSoldP > qBoughtP || qSoldC > qBoughtC;
+
+    // Travas exigem par LIMPO 1×1 (spec). Quantidades desiguais / 3+ pernas ⇒ INDEFINIDA
+    // — evita rotular como trava e subestimar risco (ex.: 800 vendidas / 700 protegidas).
+    let tipo: string;
+    if (vp.length === 1 && cp.length === 1 && vc.length === 1 && cc.length === 1) tipo = 'IRON_CONDOR';
+    else if (vp.length === 1 && cp.length === 1 && !hasVC && !hasCC) tipo = 'TRAVA_ALTA';
+    else if (vc.length === 1 && cc.length === 1 && !hasVP && !hasCP) tipo = 'TRAVA_BAIXA';
+    else if (hasVP && !hasCP && !hasVC && !hasCC) tipo = 'PUT_SECA';
+    else if ((hasVP && hasCC && !hasCP) || (hasVC && hasCP && !hasCC)) tipo = 'DESCOBERTA_MISTA';
+    else tipo = 'INDEFINIDA';
+
+    // Risco ilimitado quando há venda de PUT a descoberto sem proteção equivalente.
+    const riscoIlimitado = tipo === 'PUT_SECA' || tipo === 'DESCOBERTA_MISTA' || (tipo === 'INDEFINIDA' && descobertoLiquido);
+
+    // perna vendida que dirige o risco (PUT vendida de maior strike; senão CALL vendida de menor strike)
+    const vendidaPrincipal = hasVP
+      ? vp.slice().sort((a, b) => b.strike - a.strike)[0]
+      : (hasVC ? vc.slice().sort((a, b) => a.strike - b.strike)[0] : null);
+
+    // moneyness da vendida
+    let moneyness = 'n/d';
+    if (vendidaPrincipal && vendidaPrincipal.spot > 0 && vendidaPrincipal.strike > 0) {
+      const { spot, strike, type } = vendidaPrincipal;
+      const band = Math.abs(spot - strike) / strike <= 0.01;
+      if (band) moneyness = 'ATM';
+      else if (type === 'PUT') moneyness = spot < strike ? 'ITM' : 'OTM';
+      else moneyness = spot > strike ? 'ITM' : 'OTM';
+    }
+
+    // custo de zerar: recompra vendida (paga = −), vende comprada (recebe = +)
+    const custo_zerar = r2(gl.reduce((s, l) => s + (l.side === 'VENDA' ? -1 : 1) * l.last * l.quantity, 0));
+
+    // risco máximo (só para travas de mesmo tipo / condor)
+    let risco_maximo: number | null = null;
+    if (tipo === 'TRAVA_ALTA') {
+      const sold = vp.slice().sort((a, b) => b.strike - a.strike)[0];
+      const bought = cp.filter((l) => l.strike < sold.strike).sort((a, b) => b.strike - a.strike)[0] ?? cp[0];
+      if (sold && bought) {
+        const width = Math.abs(sold.strike - bought.strike);
+        const credito = sold.entry - bought.entry;
+        risco_maximo = r2(Math.max(0, (width - credito)) * sold.quantity);
+      }
+    } else if (tipo === 'TRAVA_BAIXA') {
+      const sold = vc.slice().sort((a, b) => a.strike - b.strike)[0];
+      const bought = cc.filter((l) => l.strike > sold.strike).sort((a, b) => a.strike - b.strike)[0] ?? cc[0];
+      if (sold && bought) {
+        const width = Math.abs(bought.strike - sold.strike);
+        const credito = sold.entry - bought.entry;
+        risco_maximo = r2(Math.max(0, (width - credito)) * sold.quantity);
+      }
+    } else if (tipo === 'IRON_CONDOR') {
+      const soldP = vp.slice().sort((a, b) => b.strike - a.strike)[0];
+      const boughtP = cp.slice().sort((a, b) => b.strike - a.strike)[0];
+      const soldC = vc.slice().sort((a, b) => a.strike - b.strike)[0];
+      const boughtC = cc.slice().sort((a, b) => a.strike - b.strike)[0];
+      const widthP = Math.abs(soldP.strike - boughtP.strike);
+      const widthC = Math.abs(boughtC.strike - soldC.strike);
+      const creditoTot = (soldP.entry - boughtP.entry) + (soldC.entry - boughtC.entry);
+      const qty = Math.max(soldP.quantity, soldC.quantity);
+      risco_maximo = r2(Math.max(0, Math.max(widthP, widthC) - creditoTot) * qty);
+    }
+
+    // desembolso se exercido: só pernas VENDIDAS PUT
+    const desembolso_se_exercido = r2(vp.reduce((s, l) => s + l.strike * l.quantity, 0));
+    const dte = vendidaPrincipal ? dteFromExpiry(vendidaPrincipal.expiry) : dteFromExpiry(gl[0].expiry);
+    const pl_mtm = r2(gl.reduce((s, l) => s + l.pl_value, 0));
+
+    let semaforo = '🟢';
+    if (moneyness === 'ITM' || riscoIlimitado) semaforo = '🔴';
+    else if (moneyness === 'ATM' || (dte !== null && dte < 10)) semaforo = '🟡';
+
+    estruturas.push({
+      ticker: gl[0].ticker,
+      tipo,
+      due_date: gl[0].expiry,
+      dte,
+      pernas: gl.map((l) => ({ option_ticker: l.option_ticker, side: l.side, type: l.type, strike: l.strike, quantity: l.quantity, last: l.last, pl_value: l.pl_value })),
+      moneyness_vendida: moneyness,
+      custo_zerar,
+      risco_maximo,
+      risco_ilimitado: riscoIlimitado,
+      desembolso_se_exercido,
+      pl_mtm,
+      semaforo,
+    });
+  }
+
+  // ordena: críticas primeiro, depois por |custo_zerar|
+  const ordem: any = { '🔴': 0, '🟡': 1, '🟢': 2 };
+  estruturas.sort((a, b) => (ordem[a.semaforo] - ordem[b.semaforo]) || (Math.abs(a.custo_zerar) - Math.abs(b.custo_zerar)));
+
+  // ── portfólio ──
+  const pl_mtm_total = r2(legs.reduce((s, l) => s + l.pl_value, 0));
+  const custo_zerar_carteira_total = r2(estruturas.reduce((s, e) => s + e.custo_zerar, 0));
+  const estruturas_criticas = estruturas.filter((e) => e.semaforo === '🔴').length;
+
+  const notionalMap = new Map<string, number>();
+  for (const l of legs) if (l.side === 'VENDA') notionalMap.set(l.ticker, (notionalMap.get(l.ticker) ?? 0) + l.strike * l.quantity);
+  const concentracao_por_ativo = [...notionalMap.entries()].map(([ticker, notional]) => ({
+    ticker,
+    notional_vendido: r2(notional),
+    pct_patrimonio: r2((notional / patrimonio) * 100),
+    acima_limite: (notional / patrimonio) * 100 > limitePct,
+  })).sort((a, b) => b.notional_vendido - a.notional_vendido);
+
+  const alerta_descobertas = estruturas.filter((e) => e.risco_ilimitado).map((e) => ({ ticker: e.ticker, tipo: e.tipo, due_date: e.due_date, option_tickers: e.pernas.map((p: any) => p.option_ticker) }));
+
+  return {
+    resumo: {
+      pl_mtm_total,
+      custo_zerar_carteira_total,
+      total_estruturas: estruturas.length,
+      estruturas_criticas,
+      patrimonio_considerado: patrimonio,
+      limite_concentracao_pct: limitePct,
+      concentracao_por_ativo,
+      alerta_descobertas,
+    },
+    estruturas,
+    snapshot_timestamp: new Date().toISOString(),
+    base_calculo: 'Agrupamento por estrutura a partir do cockpit (Google Sheets). Cálculo pelo LAST/close. Só reporta estado — não decide rolar/encerrar. Não chama OpLab.',
+  };
+}
+
 function register(srv: Server) {
   srv.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -209,6 +398,18 @@ function register(srv: Server) {
         inputSchema: { type: 'object', properties: {} }
       },
       {
+        name: 'get_status_operacoes',
+        description: 'VISÃO EXECUTIVA da CARTEIRA agrupada por ESTRUTURA (não por perna solta). Uma chamada devolve, para cada estrutura (chave TICKER+vencimento): tipo (PUT_SECA / TRAVA_ALTA / TRAVA_BAIXA / DESCOBERTA_MISTA / IRON_CONDOR / INDEFINIDA), custo de zerar, risco máximo (ou risco_ilimitado), desembolso se exercido, DTE, moneyness da vendida, P&L MTM e um semáforo 🔴🟡🟢. No topo: P&L total, custo de zerar a carteira, concentração por ativo (% do patrimônio informado), contagem de estruturas críticas e alerta de descobertas. Substitui a montagem manual de 5+ chamadas. Só reporta estado — NÃO decide rolar/encerrar. Lê apenas o cockpit (sem OpLab). Determinístico.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            incluir_encerradas: { type: 'boolean', description: 'Incluir estruturas encerradas/exercidas (padrão: false — só ATIVAS).' },
+            patrimonio: { type: 'number', description: 'Patrimônio total em R$ para calcular concentração (padrão: 120000). A ferramenta NÃO adivinha.' },
+            limite_concentracao_pct: { type: 'number', description: 'Limite de concentração por ativo em % do patrimônio para o flag acima_limite (padrão: 25).' }
+          }
+        }
+      },
+      {
         name: 'acionar_automacao_planilha',
         description: 'Dispara uma automação no Google Apps Script da planilha OPLab (atualização de dados, scanner, gregas etc). O servidor faz POST para o Web App configurado em APPS_SCRIPT_WEB_APP_URL com o token compartilhado e o nome da função. Retorna a resposta do Apps Script.',
         inputSchema: {
@@ -293,6 +494,7 @@ function register(srv: Server) {
   try {
     let range = '';
     if (name === 'get_cockpit_ativas') range = 'COCKPIT!A10:Z500';
+    else if (name === 'get_status_operacoes') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_cockpit_historico') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_resumo_mensal') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_cockpit_por_ativo') range = 'COCKPIT!A10:Z500';
@@ -757,6 +959,8 @@ function register(srv: Server) {
         avisos,
         saudaveis,
       } as any;
+    } else if (name === 'get_status_operacoes') {
+      data = buildStatusOperacoes(data, args as any) as any;
     }
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
   } catch (error: any) {
