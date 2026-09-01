@@ -144,13 +144,13 @@ function register(srv: Server) {
       },
       {
         name: 'get_alertas_posicoes',
-        description: 'ALERTAS DE RISCO da CARTEIRA / PORTFÓLIO. Avalia as posições ATIVAS de venda (aba COCKPIT) e retorna alertas por nível (CRITICO, ALERTA, AVISO) considerando DTE (dias até o vencimento), MONEYNESS (ITM/ATM) e PL_VALUE / MAX_GAIN, com ação sugerida. Use para "posições em risco", "o que está pressionado", "alertas da carteira", "o que preciso manejar". Os limiares de DTE crítico e de stop têm default alinhado ao projeto, mas podem ser sobrescritos (ver parâmetros) se esses parâmetros mudarem — a ferramenta NÃO fica presa a um número antigo.',
+        description: 'POSIÇÕES SINALIZADAS da CARTEIRA / PORTFÓLIO. Avalia as posições ATIVAS de venda (aba COCKPIT) contra critérios de DTE (dias até o vencimento), MONEYNESS (ITM/ATM) e PL_VALUE / MAX_GAIN, e retorna as que bateram algum critério — cada uma com "motivo" FACTUAL (DTE_CRITICO, ITM_DTE_CRITICO, STOP_ATINGIDO, ITM, DTE_MEDIO, PL_NEGATIVO_50_100, DTE_MODERADO, ATM) e os números crus (dte, moneyness, pl_value). Números apenas — SEM nível de severidade nem ação sugerida embutidos; quem chama decide nível/ação a partir do motivo + limiares (ver parâmetros). Use para "posições em risco", "o que está pressionado", "o que preciso manejar".',
         inputSchema: {
           type: 'object',
           properties: {
-            limite_dte_critico: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, a posição vira CRITICO por DTE_CRITICO (padrão: 10, mesmo valor de dte_critico_dias do projeto). Independente de limite_dte_critico_itm.' },
-            limite_dte_critico_itm: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, uma posição ITM vira CRITICO por ITM_DTE_CRITICO (padrão: 20). Parâmetro INDEPENDENTE de limite_dte_critico — mudar um não afeta o outro.' },
-            limite_stop_pct: { type: 'number', description: 'Perda (em % do prêmio máximo/MAX_GAIN) a partir da qual a posição vira CRITICO por STOP_ATINGIDO (padrão: 100 = perda maior que 100% do prêmio).' },
+            limite_dte_critico: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, a posição é sinalizada com motivo DTE_CRITICO (padrão: 10, mesmo valor de dte_critico_dias do projeto). Independente de limite_dte_critico_itm.' },
+            limite_dte_critico_itm: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, uma posição ITM é sinalizada com motivo ITM_DTE_CRITICO (padrão: 20). Parâmetro INDEPENDENTE de limite_dte_critico — mudar um não afeta o outro.' },
+            limite_stop_pct: { type: 'number', description: 'Perda (em % do prêmio máximo/MAX_GAIN) a partir da qual a posição é sinalizada com motivo STOP_ATINGIDO (padrão: 100 = perda maior que 100% do prêmio).' },
           }
         }
       },
@@ -181,7 +181,7 @@ function register(srv: Server) {
       },
       {
         name: 'get_status_operacoes',
-        description: 'VISÃO EXECUTIVA da CARTEIRA agrupada por ESTRUTURA (não por perna solta), com RISCO REAL de payoff. Classifica cada grupo (TICKER+vencimento) por lógica de payoff — PUT_SECA / CALL_SECA / TRAVA_ALTA / TRAVA_BAIXA / IRON_CONDOR / DESCOBERTA_MISTA / ESTRUTURA_COMPLEXA — casando venda×proteção do MESMO tipo por QUANTIDADE (ex.: 4000 PUTs vendidas / 3000 protegidas ⇒ 3000 casadas + 1000 descobertas explícitas). Por estrutura devolve: quantidades casada/descoberta por lado, risco_maximo_travado (largura×qtd_casada − crédito), risco_adicional_descoberto, flags risco_ilimitado/parcial, desembolso_se_exercido_total, custo_zerar (com custo_zerar_convencao: positivo=crédito recebido, negativo=débito pago), DTE, moneyness, P&L MTM e semáforo 🔴🟡🟢. No topo: concentração por ativo separando RISCO TRAVADO de RISCO DESCOBERTO (cada um com seu limite), risco travado/descoberto da carteira, alertas de descobertas e de revisão manual. BREAKING CHANGE vs versão anterior: o campo "notional_vendido"/"pct_patrimonio" (soma cega de strike×qtd) foi substituído por concentracao_risco_pct + concentracao_descoberta_pct baseados no risco real; o notional bruto continua disponível como "notional_vendido_bruto" apenas para referência. Só reporta estado — NÃO decide rolar/encerrar (isso é do get_analise_manejo). Lê apenas o cockpit (sem OpLab). Determinístico.',
+        description: 'VISÃO EXECUTIVA da CARTEIRA agrupada por ESTRUTURA (não por perna solta), com RISCO REAL de payoff. Classifica cada grupo (TICKER+vencimento) por lógica de payoff — PUT_SECA / CALL_SECA / TRAVA_ALTA / TRAVA_BAIXA / IRON_CONDOR / DESCOBERTA_MISTA / ESTRUTURA_COMPLEXA — casando venda×proteção do MESMO tipo por QUANTIDADE (ex.: 4000 PUTs vendidas / 3000 protegidas ⇒ 3000 casadas + 1000 descobertas explícitas). Por estrutura devolve: quantidades casada/descoberta por lado, risco_maximo_travado (largura×qtd_casada − crédito), risco_adicional_descoberto, flags risco_ilimitado/parcial, desembolso_se_exercido_total, custo_zerar (com custo_zerar_convencao: positivo=crédito recebido, negativo=débito pago), DTE, moneyness, P&L MTM. Números brutos apenas — SEM classificação/semáforo pronto embutido; quem chama decide a severidade a partir de risco_ilimitado/moneyness/DTE (mesmos limiares do golden_rules.md). Lista ordenada por risco real (maior primeiro), puramente numérico. No topo: concentração por ativo separando RISCO TRAVADO de RISCO DESCOBERTO (cada um com seu limite), risco travado/descoberto da carteira, alertas de descobertas e de revisão manual. BREAKING CHANGE vs versão anterior: o campo "notional_vendido"/"pct_patrimonio" (soma cega de strike×qtd) foi substituído por concentracao_risco_pct + concentracao_descoberta_pct baseados no risco real; o notional bruto continua disponível como "notional_vendido_bruto" apenas para referência. Só reporta estado — NÃO decide rolar/encerrar (isso é do get_analise_manejo). Lê apenas o cockpit (sem OpLab). Determinístico.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -676,8 +676,10 @@ function register(srv: Server) {
         return null;
       };
 
-      interface Alerta {
-        nivel: 'CRITICO' | 'ALERTA' | 'AVISO';
+      // Sem nivel/acao_sugerida/agrupamento pré-julgado: um único array com o
+      // motivo (factual — o que aconteceu) e os números crus de cada posição
+      // sinalizada. A skill decide nível e ação a partir de motivo + limiares.
+      interface PosicaoSinalizada {
         motivo: string;
         descricao: string;
         opcao: string;
@@ -688,11 +690,8 @@ function register(srv: Server) {
         spot: number;
         moneyness: string;
         pl_value: number;
-        acao_sugerida: string;
       }
-      const criticos: Alerta[] = [];
-      const alertas: Alerta[] = [];
-      const avisos:   Alerta[] = [];
+      const posicoes_sinalizadas: PosicaoSinalizada[] = [];
       let saudaveis = 0;
 
       for (const item of ativasArr) {
@@ -712,54 +711,41 @@ function register(srv: Server) {
 
         const base = { opcao, ticker, side, dte, strike, spot, moneyness, pl_value: plValue };
 
-        // CRITICO
         if (dte > 0 && dte < limiteDteCritico) {
-          criticos.push({ ...base, nivel: 'CRITICO', motivo: 'DTE_CRITICO',
-            descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Encerrar urgente' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'DTE_CRITICO', descricao: `${opcao} vence em ${dte} dias` });
           continue;
         }
         if (moneyness === 'ITM' && dte > 0 && dte < limiteDteCriticoItm) {
-          criticos.push({ ...base, nivel: 'CRITICO', motivo: 'ITM_DTE_CRITICO',
-            descricao: `${opcao} ITM com ${dte} dias`, acao_sugerida: 'Avaliar encerramento' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'ITM_DTE_CRITICO', descricao: `${opcao} ITM com ${dte} dias` });
           continue;
         }
         if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain * limiteStopFrac) {
-          criticos.push({ ...base, nivel: 'CRITICO', motivo: 'STOP_ATINGIDO',
-            descricao: `${opcao} com perda > ${limiteStopPct}% do prêmio máximo`, acao_sugerida: 'Stop atingido — encerrar' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'STOP_ATINGIDO', descricao: `${opcao} com perda > ${limiteStopPct}% do prêmio máximo` });
           continue;
         }
-
-        // ALERTA
         if (moneyness === 'ITM') {
-          alertas.push({ ...base, nivel: 'ALERTA', motivo: 'ITM',
-            descricao: `${opcao} está ITM`, acao_sugerida: 'Monitorar diariamente' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'ITM', descricao: `${opcao} está ITM` });
           continue;
         }
-        // Banda ALERTA começa exatamente onde termina a banda CRITICO de DTE —
+        // Banda DTE_MEDIO começa exatamente onde termina a banda de DTE_CRITICO —
         // se limite_dte_critico mudar, esta banda acompanha (sem buraco de dias
-        // sem classificação nem sobreposição com o CRITICO).
+        // sem sinalização nem sobreposição).
         if (dte >= limiteDteCritico && dte <= 21) {
-          alertas.push({ ...base, nivel: 'ALERTA', motivo: 'DTE_MEDIO',
-            descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Planejar manejo' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'DTE_MEDIO', descricao: `${opcao} vence em ${dte} dias` });
           continue;
         }
-        // Banda ALERTA de P&L vai de 50% do prêmio até o limiar de stop (não mais
-        // um teto fixo de 100%) — acompanha limite_stop_pct pelo mesmo motivo.
+        // Banda de P&L vai de 50% do prêmio até o limiar de stop (não mais um teto
+        // fixo de 100%) — acompanha limite_stop_pct pelo mesmo motivo.
         if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain * 0.5 && Math.abs(plValue) <= maxGain * limiteStopFrac) {
-          alertas.push({ ...base, nivel: 'ALERTA', motivo: 'PL_NEGATIVO_50_100',
-            descricao: `${opcao} perda entre 50% e ${limiteStopPct}% do prêmio máximo`, acao_sugerida: 'Planejar manejo' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'PL_NEGATIVO_50_100', descricao: `${opcao} perda entre 50% e ${limiteStopPct}% do prêmio máximo` });
           continue;
         }
-
-        // AVISO
         if (dte >= 22 && dte <= 30) {
-          avisos.push({ ...base, nivel: 'AVISO', motivo: 'DTE_MODERADO',
-            descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Acompanhar' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'DTE_MODERADO', descricao: `${opcao} vence em ${dte} dias` });
           continue;
         }
         if (moneyness === 'ATM') {
-          avisos.push({ ...base, nivel: 'AVISO', motivo: 'ATM',
-            descricao: `${opcao} está ATM`, acao_sugerida: 'Acompanhar' });
+          posicoes_sinalizadas.push({ ...base, motivo: 'ATM', descricao: `${opcao} está ATM` });
           continue;
         }
 
@@ -767,13 +753,11 @@ function register(srv: Server) {
       }
 
       data = {
-        total_alertas: criticos.length + alertas.length + avisos.length,
+        total_sinalizadas: posicoes_sinalizadas.length,
         limite_dte_critico: limiteDteCritico,
         limite_dte_critico_itm: limiteDteCriticoItm,
         limite_stop_pct: limiteStopPct,
-        criticos,
-        alertas,
-        avisos,
+        posicoes_sinalizadas,
         saudaveis,
       } as any;
     } else if (name === 'get_status_operacoes') {

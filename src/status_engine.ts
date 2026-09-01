@@ -238,11 +238,6 @@ export function buildStatusOperacoes(rows: any[], args: StatusArgs, hoje: Date =
     const dte = vendidaPrincipal ? dteFromExpiry(vendidaPrincipal.expiry, hoje) : dteFromExpiry(gl[0].expiry, hoje);
     const pl_mtm = r2(gl.reduce((s, l) => s + l.pl_value, 0));
 
-    let semaforo = '🟢';
-    if (revisao_manual) semaforo = '🟡';
-    else if (risco_ilimitado || risco_ilimitado_parcial || moneyness === 'ITM') semaforo = '🔴';
-    else if (moneyness === 'ATM' || (dte !== null && dte < 10)) semaforo = '🟡';
-
     estruturas.push({
       ticker: gl[0].ticker,
       due_date: gl[0].expiry,
@@ -267,15 +262,15 @@ export function buildStatusOperacoes(rows: any[], args: StatusArgs, hoje: Date =
       custo_zerar_convencao: CUSTO_ZERAR_CONVENCAO,
       moneyness_vendida: moneyness,
       pl_mtm,
-      semaforo,
       revisao_manual,
       pernas: gl.map((l) => ({ option_ticker: l.option_ticker, side: l.side, category: l.type, strike: l.strike, quantity: l.quantity, last: l.last, pl_value: l.pl_value })),
     });
   }
 
-  const ordem: any = { '🔴': 0, '🟡': 1, '🟢': 2 };
+  // Ordenação puramente numérica por risco real — sem hierarquia de classificação
+  // embutida (quem chama pode reordenar como quiser usando os campos crus).
   const riscoReal = (e: any) => (e.risco_ilimitado ? e.desembolso_se_exercido_total : e.risco_maximo_travado) + e.risco_adicional_descoberto;
-  estruturas.sort((a, b) => (ordem[a.semaforo] - ordem[b.semaforo]) || (riscoReal(b) - riscoReal(a)));
+  estruturas.sort((a, b) => riscoReal(b) - riscoReal(a));
 
   // 6) consolidação por ticker (concentração por RISCO REAL, não por notional bruto)
   const porTicker = new Map<string, any>();
@@ -313,7 +308,6 @@ export function buildStatusOperacoes(rows: any[], args: StatusArgs, hoje: Date =
 
   const pl_mtm_total = r2(legs.reduce((s, l) => s + l.pl_value, 0));
   const custo_zerar_carteira_total = r2(estruturas.reduce((s, e) => s + e.custo_zerar, 0));
-  const estruturas_criticas = estruturas.filter((e) => e.semaforo === '🔴').length;
   const risco_travado_carteira = r2(concentracao_por_ativo.reduce((s, t) => s + t.risco_travado_total, 0));
   const risco_descoberto_carteira = r2(concentracao_por_ativo.reduce((s, t) => s + t.risco_descoberto_total, 0));
 
@@ -330,7 +324,6 @@ export function buildStatusOperacoes(rows: any[], args: StatusArgs, hoje: Date =
       risco_travado_carteira,
       risco_descoberto_carteira,
       total_estruturas: estruturas.length,
-      estruturas_criticas,
       patrimonio_considerado: patrimonio,
       limite_concentracao_pct: limitePct,
       limite_concentracao_descoberta_pct: limiteDescPct,
