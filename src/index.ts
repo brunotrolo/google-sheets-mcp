@@ -155,11 +155,6 @@ function register(srv: Server) {
         }
       },
       {
-        name: 'get_screener_quantitativo',
-        description: 'Retorna as oportunidades da aba SCREENER_QUANTITATIVO.',
-        inputSchema: { type: 'object', properties: {} }
-      },
-      {
         name: 'get_scanner_opcoes',
         description: 'Retorna a liquidez e gregas da aba SCANNER_OPCOES.',
         inputSchema: { type: 'object', properties: {} }
@@ -302,7 +297,6 @@ function register(srv: Server) {
     else if (name === 'get_resumo_por_ativo') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_dashboard_mensal') range = 'COCKPIT!A10:Z500';
     else if (name === 'get_alertas_posicoes') range = 'COCKPIT!A10:Z500';
-    else if (name === 'get_screener_quantitativo') range = 'SCREENER_QUANTITATIVO!A1:Z200';
     else if (name === 'get_scanner_opcoes') range = 'SCANNER_OPCOES!A1:Z500';
     else if (name === 'get_maiores_lucros') range = 'SELECAO_OPCOES_MAIORES_LUCROS!A1:Z200';
     else if (name === 'get_maiores_volumes') range = 'SELECAO_MAIORES_VOLUMES!A1:Z200';
