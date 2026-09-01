@@ -141,8 +141,15 @@ export function rowToLeg(it: any): StatusLeg {
 
 export function buildStatusOperacoes(rows: any[], args: StatusArgs, hoje: Date = new Date()) {
   const incluirEnc = args?.incluir_encerradas === true;
-  const patrimonio = Number.isFinite(Number(args?.patrimonio)) && Number(args?.patrimonio) > 0 ? Number(args.patrimonio) : 120000;
-  const limitePct = Number.isFinite(Number(args?.limite_concentracao_pct)) ? Number(args.limite_concentracao_pct) : 25;
+  // patrimonio é OBRIGATÓRIO (§9: nenhuma suposição silenciosa) — um default fixo
+  // ficaria desatualizado assim que o patrimônio real do operador mudasse, e a
+  // concentração calculada estaria simplesmente errada sem ninguém perceber.
+  if (!Number.isFinite(Number(args?.patrimonio)) || Number(args?.patrimonio) <= 0) {
+    throw new Error('Parâmetro "patrimonio" é obrigatório (patrimônio total em R$, > 0). A ferramenta NÃO adivinha.');
+  }
+  const patrimonio = Number(args.patrimonio);
+  // 20% é o limite vigente em portfolio_params.yaml (antes divergia: default aqui era 25).
+  const limitePct = Number.isFinite(Number(args?.limite_concentracao_pct)) ? Number(args.limite_concentracao_pct) : 20;
   const limiteDescPct = Number.isFinite(Number(args?.limite_concentracao_descoberta_pct)) ? Number(args.limite_concentracao_descoberta_pct) : 15;
   const r2 = (n: number) => Math.round(n * 100) / 100;
 

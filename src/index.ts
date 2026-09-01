@@ -144,8 +144,14 @@ function register(srv: Server) {
       },
       {
         name: 'get_alertas_posicoes',
-        description: 'ALERTAS DE RISCO da CARTEIRA / PORTFÓLIO. Avalia as posições ATIVAS de venda (aba COCKPIT) e retorna alertas por nível (CRITICO, ALERTA, AVISO) considerando DTE (dias até o vencimento), MONEYNESS (ITM/ATM) e PL_VALUE / MAX_GAIN, com ação sugerida. Use para "posições em risco", "o que está pressionado", "alertas da carteira", "o que preciso manejar".',
-        inputSchema: { type: 'object', properties: {} }
+        description: 'ALERTAS DE RISCO da CARTEIRA / PORTFÓLIO. Avalia as posições ATIVAS de venda (aba COCKPIT) e retorna alertas por nível (CRITICO, ALERTA, AVISO) considerando DTE (dias até o vencimento), MONEYNESS (ITM/ATM) e PL_VALUE / MAX_GAIN, com ação sugerida. Use para "posições em risco", "o que está pressionado", "alertas da carteira", "o que preciso manejar". Os limiares de DTE crítico e de stop têm default alinhado ao projeto, mas podem ser sobrescritos (ver parâmetros) se esses parâmetros mudarem — a ferramenta NÃO fica presa a um número antigo.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            limite_dte_critico: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, a posição vira CRITICO por DTE_CRITICO (padrão: 10, mesmo valor de dte_critico_dias do projeto).' },
+            limite_stop_pct: { type: 'number', description: 'Perda (em % do prêmio máximo/MAX_GAIN) a partir da qual a posição vira CRITICO por STOP_ATINGIDO (padrão: 100 = perda maior que 100% do prêmio).' },
+          }
+        }
       },
       {
         name: 'get_screener_quantitativo',
@@ -184,10 +190,11 @@ function register(srv: Server) {
           type: 'object',
           properties: {
             incluir_encerradas: { type: 'boolean', description: 'Incluir estruturas encerradas/exercidas (padrão: false — só ATIVAS).' },
-            patrimonio: { type: 'number', description: 'Patrimônio total em R$ para calcular concentração (padrão: 120000). A ferramenta NÃO adivinha.' },
-            limite_concentracao_pct: { type: 'number', description: 'Limite para concentracao_risco_pct (risco TRAVADO) em % do patrimônio (padrão: 25).' },
+            patrimonio: { type: 'number', description: 'OBRIGATÓRIO. Patrimônio total em R$ para calcular concentração. A ferramenta NÃO adivinha — sem este parâmetro, retorna erro em vez de calcular concentração com um valor desatualizado.' },
+            limite_concentracao_pct: { type: 'number', description: 'Limite para concentracao_risco_pct (risco TRAVADO) em % do patrimônio (padrão: 20, conforme portfolio_params.yaml).' },
             limite_concentracao_descoberta_pct: { type: 'number', description: 'Limite para concentracao_descoberta_pct (risco DESCOBERTO, onde o notional é risco de verdade) em % do patrimônio — mais rígido (padrão: 15).' }
-          }
+          },
+          required: ['patrimonio']
         }
       },
       {
@@ -629,6 +636,15 @@ function register(srv: Server) {
         })),
       } as any;
     } else if (name === 'get_alertas_posicoes') {
+      // Limiares configuráveis (§9: nenhum número preso no código sem forma de
+      // ajustar de fora). Defaults = valores vigentes do projeto hoje.
+      const aArgs = args as any;
+      const limiteDteCritico = Number.isFinite(Number(aArgs?.limite_dte_critico)) && Number(aArgs.limite_dte_critico) > 0
+        ? Number(aArgs.limite_dte_critico) : 10;
+      const limiteStopPct = Number.isFinite(Number(aArgs?.limite_stop_pct)) && Number(aArgs.limite_stop_pct) > 0
+        ? Number(aArgs.limite_stop_pct) : 100;
+      const limiteStopFrac = limiteStopPct / 100;
+
       // Posições ATIVAS via mesma lógica de get_cockpit_ativas
       const ativasArr = data.filter(item => {
         const s = String(item['STATUS'] || item['STATUS_OP'] || item['VENDA/COMPRA'] || '').toUpperCase();
@@ -685,19 +701,19 @@ function register(srv: Server) {
         const base = { opcao, ticker, side, dte, strike, spot, moneyness, pl_value: plValue };
 
         // CRITICO
-        if (dte > 0 && dte < 10) {
+        if (dte > 0 && dte < limiteDteCritico) {
           criticos.push({ ...base, nivel: 'CRITICO', motivo: 'DTE_CRITICO',
             descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Encerrar urgente' });
           continue;
         }
-        if (moneyness === 'ITM' && dte > 0 && dte < 20) {
+        if (moneyness === 'ITM' && dte > 0 && dte < limiteDteCritico * 2) {
           criticos.push({ ...base, nivel: 'CRITICO', motivo: 'ITM_DTE_CRITICO',
             descricao: `${opcao} ITM com ${dte} dias`, acao_sugerida: 'Avaliar encerramento' });
           continue;
         }
-        if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain) {
+        if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain * limiteStopFrac) {
           criticos.push({ ...base, nivel: 'CRITICO', motivo: 'STOP_ATINGIDO',
-            descricao: `${opcao} com perda > 100% do prêmio máximo`, acao_sugerida: 'Stop atingido — encerrar' });
+            descricao: `${opcao} com perda > ${limiteStopPct}% do prêmio máximo`, acao_sugerida: 'Stop atingido — encerrar' });
           continue;
         }
 
@@ -707,14 +723,19 @@ function register(srv: Server) {
             descricao: `${opcao} está ITM`, acao_sugerida: 'Monitorar diariamente' });
           continue;
         }
-        if (dte >= 10 && dte <= 21) {
+        // Banda ALERTA começa exatamente onde termina a banda CRITICO de DTE —
+        // se limite_dte_critico mudar, esta banda acompanha (sem buraco de dias
+        // sem classificação nem sobreposição com o CRITICO).
+        if (dte >= limiteDteCritico && dte <= 21) {
           alertas.push({ ...base, nivel: 'ALERTA', motivo: 'DTE_MEDIO',
             descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Planejar manejo' });
           continue;
         }
-        if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain * 0.5 && Math.abs(plValue) <= maxGain) {
+        // Banda ALERTA de P&L vai de 50% do prêmio até o limiar de stop (não mais
+        // um teto fixo de 100%) — acompanha limite_stop_pct pelo mesmo motivo.
+        if (plValue < 0 && maxGain > 0 && Math.abs(plValue) > maxGain * 0.5 && Math.abs(plValue) <= maxGain * limiteStopFrac) {
           alertas.push({ ...base, nivel: 'ALERTA', motivo: 'PL_NEGATIVO_50_100',
-            descricao: `${opcao} perda entre 50% e 100% do prêmio máximo`, acao_sugerida: 'Planejar manejo' });
+            descricao: `${opcao} perda entre 50% e ${limiteStopPct}% do prêmio máximo`, acao_sugerida: 'Planejar manejo' });
           continue;
         }
 
@@ -735,6 +756,8 @@ function register(srv: Server) {
 
       data = {
         total_alertas: criticos.length + alertas.length + avisos.length,
+        limite_dte_critico: limiteDteCritico,
+        limite_stop_pct: limiteStopPct,
         criticos,
         alertas,
         avisos,
