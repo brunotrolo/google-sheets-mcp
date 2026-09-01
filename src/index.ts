@@ -148,7 +148,8 @@ function register(srv: Server) {
         inputSchema: {
           type: 'object',
           properties: {
-            limite_dte_critico: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, a posição vira CRITICO por DTE_CRITICO (padrão: 10, mesmo valor de dte_critico_dias do projeto).' },
+            limite_dte_critico: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, a posição vira CRITICO por DTE_CRITICO (padrão: 10, mesmo valor de dte_critico_dias do projeto). Independente de limite_dte_critico_itm.' },
+            limite_dte_critico_itm: { type: 'number', description: 'Abaixo deste nº de dias até o vencimento, uma posição ITM vira CRITICO por ITM_DTE_CRITICO (padrão: 20). Parâmetro INDEPENDENTE de limite_dte_critico — mudar um não afeta o outro.' },
             limite_stop_pct: { type: 'number', description: 'Perda (em % do prêmio máximo/MAX_GAIN) a partir da qual a posição vira CRITICO por STOP_ATINGIDO (padrão: 100 = perda maior que 100% do prêmio).' },
           }
         }
@@ -255,8 +256,20 @@ function register(srv: Server) {
       try { parsed = JSON.parse(bodyText); } catch { /* texto puro */ }
 
       if (!resp.ok) {
+        // Um Web App do Apps Script "morto" (deploy antigo removido/substituído por um
+        // novo, mudando a URL) não retorna JSON de erro — retorna uma PÁGINA HTML do
+        // Google Drive ("Page Not Found"/"Sorry, unable to open the file"). Sem este
+        // atalho, o operador via um dump de milhares de caracteres de HTML/JS minificado
+        // sem entender a causa real. Detecta esse padrão e dá o diagnóstico direto.
+        const pareceHtml = /<!DOCTYPE html|<html[\s>]/i.test(bodyText);
+        const dica = (resp.status === 404 && pareceHtml)
+          ? ' [isto é uma página HTML do Google, não um erro do Apps Script — a URL em APPS_SCRIPT_WEB_APP_URL provavelmente está OBSOLETA porque o Web App foi reimplantado (cada novo Deploy do Apps Script gera uma URL nova, a menos que se edite a implantação existente). Abra a planilha → Extensões → Apps Script → Implantar → Gerenciar implantações, confirme a URL ativa, e atualize a env var APPS_SCRIPT_WEB_APP_URL no Cloud Run.]'
+          : '';
+        const corpoParaExibir = pareceHtml
+          ? `${bodyText.slice(0, 200)}… (${bodyText.length} chars de HTML, truncado)`
+          : bodyText;
         return {
-          content: [{ type: 'text', text: `Apps Script retornou HTTP ${resp.status}: ${bodyText}` }],
+          content: [{ type: 'text', text: `Apps Script retornou HTTP ${resp.status}: ${corpoParaExibir}${dica}` }],
           isError: true,
         };
       }
@@ -641,6 +654,11 @@ function register(srv: Server) {
       const aArgs = args as any;
       const limiteDteCritico = Number.isFinite(Number(aArgs?.limite_dte_critico)) && Number(aArgs.limite_dte_critico) > 0
         ? Number(aArgs.limite_dte_critico) : 10;
+      // Parâmetro INDEPENDENTE de limiteDteCritico (antes era limiteDteCritico*2 —
+      // acoplamento não pedido que produzia efeito colateral surpreendente: subir
+      // limite_dte_critico ampliava também a janela ITM sem ninguém pedir isso).
+      const limiteDteCriticoItm = Number.isFinite(Number(aArgs?.limite_dte_critico_itm)) && Number(aArgs.limite_dte_critico_itm) > 0
+        ? Number(aArgs.limite_dte_critico_itm) : 20;
       const limiteStopPct = Number.isFinite(Number(aArgs?.limite_stop_pct)) && Number(aArgs.limite_stop_pct) > 0
         ? Number(aArgs.limite_stop_pct) : 100;
       const limiteStopFrac = limiteStopPct / 100;
@@ -706,7 +724,7 @@ function register(srv: Server) {
             descricao: `${opcao} vence em ${dte} dias`, acao_sugerida: 'Encerrar urgente' });
           continue;
         }
-        if (moneyness === 'ITM' && dte > 0 && dte < limiteDteCritico * 2) {
+        if (moneyness === 'ITM' && dte > 0 && dte < limiteDteCriticoItm) {
           criticos.push({ ...base, nivel: 'CRITICO', motivo: 'ITM_DTE_CRITICO',
             descricao: `${opcao} ITM com ${dte} dias`, acao_sugerida: 'Avaliar encerramento' });
           continue;
@@ -757,6 +775,7 @@ function register(srv: Server) {
       data = {
         total_alertas: criticos.length + alertas.length + avisos.length,
         limite_dte_critico: limiteDteCritico,
+        limite_dte_critico_itm: limiteDteCriticoItm,
         limite_stop_pct: limiteStopPct,
         criticos,
         alertas,
